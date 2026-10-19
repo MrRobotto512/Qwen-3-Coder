@@ -56,8 +56,8 @@ Use **Alibaba Cloud Model Studio (DashScope)** (model `qwen3-coder-plus`) or **O
 You need [Node.js 20+](https://nodejs.org) on Windows.
 
 ```powershell
-git clone <this repo>
-cd qwen-workspace
+git clone https://github.com/MrRobotto512/Qwen-3-Coder.git
+cd Qwen-3-Coder
 npm install
 npm start
 ```
