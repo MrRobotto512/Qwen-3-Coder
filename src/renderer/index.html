@@ -129,6 +129,10 @@
         <label>Temperature <input id="s-temperature" type="number" min="0" max="2" step="0.1" /></label>
         <label>Editor font size <input id="s-fontSize" type="number" min="9" max="32" /></label>
       </div>
+      <label>Context window, tokens (Ollama only)
+        <input id="s-contextLength" type="number" min="2048" step="1024" />
+        <span class="hint">How much of the conversation Qwen can see. 32768 suits agent mode; lower it if Ollama runs out of GPU memory.</span>
+      </label>
       <label class="check"><input type="checkbox" id="s-agentMode" /> Agent mode (Qwen can use tools; needs a model with tool calling)</label>
       <label class="check"><input type="checkbox" id="s-includeCurrentFile" /> Attach the open file to messages by default</label>
       <label class="check"><input type="checkbox" id="s-autoApproveEdits" /> Auto-approve file edits</label>

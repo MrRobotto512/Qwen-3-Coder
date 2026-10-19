@@ -39,13 +39,7 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
    ollama pull qwen3-coder:30b      # best local option if you have the memory
    ```
 
-3. **Raise the context window.** Ollama's default is small, and agent mode needs room for file contents. In PowerShell:
-
-   ```powershell
-   setx OLLAMA_CONTEXT_LENGTH 32768
-   ```
-
-   Then quit Ollama from the system tray and start it again.
+3. That's it. The app talks to Ollama's own API and sets the context window itself (32,768 tokens by default; change it under **⚙ → Context window**). Use a lower value if Ollama runs out of GPU memory. The status line under the chat shows how much of the window is in use.
 
 ### Option B: LM Studio
 

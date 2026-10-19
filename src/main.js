@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = {
   autoApproveEdits: false,
   autoApproveCommands: false,
   includeCurrentFile: true,
+  contextLength: 32768,
   lastWorkspace: null,
   fontSize: 14
 };
@@ -72,8 +73,8 @@ async function isProbablyBinary(abs) {
   }
 }
 
-async function walk(dir, out, limit, depth = 0) {
-  if (out.length >= limit || depth > 12) return;
+async function walk(dir, out, limit, maxDepth = 12, depth = 0) {
+  if (out.length >= limit || depth >= maxDepth) return;
   let entries;
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true });
@@ -87,7 +88,7 @@ async function walk(dir, out, limit, depth = 0) {
     if (e.isDirectory()) {
       if (IGNORED_DIRS.has(e.name)) continue;
       out.push(toRel(abs) + '/');
-      await walk(abs, out, limit, depth + 1);
+      await walk(abs, out, limit, maxDepth, depth + 1);
     } else if (e.isFile()) {
       out.push(toRel(abs));
     }
@@ -192,10 +193,10 @@ ipcMain.handle('fs:list', async (_e, rel) => {
     .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
 });
 
-ipcMain.handle('fs:listRecursive', async (_e, rel, limit = 500) => {
+ipcMain.handle('fs:listRecursive', async (_e, rel, limit = 500, maxDepth = 12) => {
   const abs = resolveInWorkspace(rel);
   const out = [];
-  await walk(abs, out, limit);
+  await walk(abs, out, limit, maxDepth);
   return { files: out, truncated: out.length >= limit };
 });
 
@@ -347,6 +348,16 @@ ipcMain.handle('chat:stream', async (event, id, payload) => {
     if (!event.sender.isDestroyed()) event.sender.send('chat:event', { id, type, data });
   };
 
+  if (await isOllama(s)) {
+    try {
+      return await streamOllama(s, payload, controller.signal, send);
+    } catch (err) {
+      return chatError(err, s);
+    } finally {
+      chatControllers.delete(id);
+    }
+  }
+
   const body = {
     model: s.model,
     messages: payload.messages,
@@ -427,13 +438,134 @@ ipcMain.handle('chat:stream', async (event, id, payload) => {
     const calls = toolCalls.filter(Boolean).map((t, i) => ({ ...t, id: t.id || `call_${Date.now()}_${i}` }));
     return { ok: true, content, reasoning, toolCalls: calls, finishReason };
   } catch (err) {
-    if (err.name === 'AbortError') return { ok: true, aborted: true };
-    let msg = err.message;
-    if (err.cause?.code === 'ECONNREFUSED') {
-      msg = `Could not connect to ${s.baseUrl}. Is Ollama / LM Studio running? (${err.cause.code})`;
-    }
-    return { ok: false, error: msg };
+    return chatError(err, s);
   } finally {
     chatControllers.delete(id);
   }
 });
+
+function chatError(err, s) {
+  if (err.name === 'AbortError') return { ok: true, aborted: true };
+  let msg = err.message;
+  if (err.cause?.code === 'ECONNREFUSED') {
+    msg = `Could not connect to ${s.baseUrl}. Is Ollama / LM Studio running? (${err.cause.code})`;
+  }
+  return { ok: false, error: msg };
+}
+
+// ---------- Ollama native API ----------
+// Ollama's OpenAI-compatible endpoint ignores the context size and silently drops the
+// oldest messages (including the system prompt) once a chat outgrows its small default.
+// The native /api/chat endpoint lets us set num_ctx, so we use it whenever we talk to Ollama.
+const ollamaCache = new Map();
+
+function ollamaRoot(s) {
+  return s.baseUrl.trim().replace(/\/+$/, '').replace(/\/v1$/, '');
+}
+
+// Only Ollama answers GET /api/version with {"version": ...}; check once per server URL.
+async function isOllama(s) {
+  const root = ollamaRoot(s);
+  if (!ollamaCache.has(root)) {
+    let yes = false;
+    try {
+      const r = await fetch(`${root}/api/version`, { signal: AbortSignal.timeout(3000) });
+      yes = r.ok && typeof (await r.json()).version === 'string';
+    } catch {
+      /* not Ollama, or not reachable */
+    }
+    ollamaCache.set(root, yes);
+  }
+  return ollamaCache.get(root);
+}
+
+function toOllamaMessages(messages) {
+  const toolNames = new Map();
+  return messages.map((m) => {
+    const out = { role: m.role, content: m.content ?? '' };
+    if (m.tool_calls?.length) {
+      out.tool_calls = m.tool_calls.map((tc) => {
+        toolNames.set(tc.id, tc.function.name);
+        let args = {};
+        try {
+          args = JSON.parse(tc.function.arguments || '{}');
+        } catch {
+          /* keep empty */
+        }
+        return { function: { name: tc.function.name, arguments: args } };
+      });
+    }
+    if (m.role === 'tool' && toolNames.has(m.tool_call_id)) out.tool_name = toolNames.get(m.tool_call_id);
+    return out;
+  });
+}
+
+async function streamOllama(s, payload, signal, send) {
+  const root = ollamaRoot(s);
+  const contextLength = Number(s.contextLength) || DEFAULT_SETTINGS.contextLength;
+  const body = {
+    model: s.model,
+    messages: toOllamaMessages(payload.messages),
+    stream: true,
+    options: { temperature: Number(s.temperature), num_ctx: contextLength }
+  };
+  if (payload.tools?.length) body.tools = payload.tools;
+
+  const res = await fetch(`${root}/api/chat`, {
+    method: 'POST',
+    headers: apiHeaders(s),
+    body: JSON.stringify(body),
+    signal
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} from ${root}: ${text.slice(0, 600)}`);
+  }
+
+  let content = '';
+  let reasoning = '';
+  const toolCalls = [];
+  let finishReason = null;
+  let promptTokens = 0;
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const handle = (j) => {
+    if (j.error) throw new Error(j.error);
+    const m = j.message || {};
+    if (m.thinking) {
+      reasoning += m.thinking;
+      send('reasoning', m.thinking);
+    }
+    if (m.content) {
+      content += m.content;
+      send('delta', m.content);
+    }
+    for (const tc of m.tool_calls || []) {
+      const args = tc.function?.arguments;
+      toolCalls.push({
+        id: `call_${Date.now()}_${toolCalls.length}`,
+        type: 'function',
+        function: { name: tc.function?.name || '', arguments: typeof args === 'string' ? args : JSON.stringify(args || {}) }
+      });
+      send('tool_progress', toolCalls.map((t) => t.function.name));
+    }
+    if (j.done) {
+      finishReason = j.done_reason || 'stop';
+      promptTokens = j.prompt_eval_count || 0;
+    }
+  };
+
+  for await (const chunk of res.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) handle(JSON.parse(line));
+    }
+  }
+  if (buffer.trim()) handle(JSON.parse(buffer));
+
+  return { ok: true, content, reasoning, toolCalls, finishReason, usage: { promptTokens, contextLength } };
+}

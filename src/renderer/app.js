@@ -447,8 +447,14 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'list_files',
-      description: 'List files and folders in the project recursively (skips node_modules, .git and build output). Folders end with "/".',
-      parameters: { type: 'object', properties: { path: { type: 'string', description: 'Folder relative to the project root. Defaults to ".".' } } }
+      description: 'List files and folders in a project folder (skips node_modules, .git and build output). Folders end with "/". Starts shallow; list a subfolder or raise depth to see more.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Folder relative to the project root. Defaults to ".".' },
+          depth: { type: 'integer', description: 'How many folder levels to descend (1-6). Defaults to 2.' }
+        }
+      }
     }
   },
   {
@@ -538,6 +544,8 @@ function systemPrompt() {
       '- Explore before you change things: use list_files, search_code and read_file to understand the relevant code. Never guess file contents.',
       '- Always read a file before editing it. Use edit_file for targeted changes and write_file for new files or full rewrites.',
       '- All paths are relative to the project root and use forward slashes.',
+      '- Tool results are produced by the tools you call, not pasted by the user. Use them to keep working on the user\'s request.',
+      '- Keep going with tool calls until the task is done; do not stop to describe what you are about to do.',
       '- The user must approve every edit and command; if they reject one, do not retry the same thing — ask what they want instead.',
       '- Make focused, minimal changes that match the existing code style. Do not create files the task does not need.',
       '- When you are done, reply with a short summary of what you changed and anything the user should do next.'
@@ -568,10 +576,11 @@ async function executeTool(call, card) {
   try {
     switch (name) {
       case 'list_files': {
-        const r = await api.listRecursive(args.path || '.', 400);
+        const depth = Math.min(6, Math.max(1, parseInt(args.depth, 10) || 2));
+        const r = await api.listRecursive(normPath(args.path || '.'), 200, depth);
         const out = r.files.join('\n') || '(empty)';
         card.setBody(out);
-        return out + (r.truncated ? '\n... (truncated — list a subfolder for more)' : '');
+        return out + (r.truncated ? '\n... (truncated at 200 entries — list a subfolder for more)' : '');
       }
       case 'read_file': {
         const tab = state.tabs.find((t) => t.path === normPath(args.path));
@@ -673,26 +682,56 @@ function truncate(s) {
   return s.length > MAX_TOOL_RESULT ? s.slice(0, MAX_TOOL_RESULT) + `\n... [truncated ${s.length - MAX_TOOL_RESULT} chars]` : s;
 }
 
-// Some Qwen builds emit tool calls as <tool_call>{...}</tool_call> text instead of structured tool_calls.
+// Some Qwen builds put tool calls in the text instead of structured tool_calls, either as
+// JSON (<tool_call>{"name": ..., "arguments": {...}}</tool_call>) or in Qwen3-Coder's XML
+// style (<function=name><parameter=key>value</parameter></function>), sometimes with
+// closing tags missing.
+const TOOL_TEXT_MARKER = /<tool_call>|<function=[\w.-]+>/;
+const MULTILINE_PARAMS = new Set(['content', 'old_text', 'new_text']);
+
+function textToolCallStart(content) {
+  const m = TOOL_TEXT_MARKER.exec(content);
+  return m ? m.index : -1;
+}
+
 function extractTextToolCalls(content) {
+  const start = textToolCallStart(content);
+  if (start < 0) return { calls: [], cleaned: content.trim() };
+  const tail = content.slice(start);
   const calls = [];
-  const cleaned = content.replace(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g, (_m, body) => {
-    try {
-      const obj = JSON.parse(body);
-      if (obj.name) {
-        calls.push({
-          id: `call_txt_${Date.now()}_${calls.length}`,
-          type: 'function',
-          function: { name: obj.name, arguments: typeof obj.arguments === 'string' ? obj.arguments : JSON.stringify(obj.arguments || {}) }
-        });
-        return '';
+  const add = (name, args) =>
+    calls.push({ id: `call_txt_${Date.now()}_${calls.length}`, type: 'function', function: { name, arguments: JSON.stringify(args || {}) } });
+
+  if (tail.includes('<function=')) {
+    for (const block of tail.split(/(?=<function=)/)) {
+      const fm = /^<function=([\w.-]+)>/.exec(block);
+      if (!fm) continue;
+      const args = {};
+      const re = /<parameter=([\w.-]+)>([\s\S]*?)(?=<\/parameter>|<parameter=|<\/function>|<\/tool_call>|$)/g;
+      let pm;
+      while ((pm = re.exec(block))) {
+        const key = pm[1];
+        let v = pm[2];
+        v = MULTILINE_PARAMS.has(key) ? v.replace(/^\r?\n/, '').replace(/\r?\n$/, '') : v.trim();
+        if (/^(start_line|end_line|depth)$/.test(key) && /^\d+$/.test(v)) v = Number(v);
+        else if (v === 'true' || v === 'false') v = v === 'true';
+        args[key] = v;
       }
-    } catch {
-      /* leave it as text */
+      add(fm[1], args);
     }
-    return _m;
-  });
-  return { calls, cleaned: cleaned.trim() };
+  } else {
+    const re = /<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|$)/g;
+    let m;
+    while ((m = re.exec(tail)) && m[0]) {
+      try {
+        const obj = JSON.parse(m[1]);
+        if (obj.name) add(obj.name, typeof obj.arguments === 'string' ? JSON.parse(obj.arguments) : obj.arguments);
+      } catch {
+        /* not JSON; ignore */
+      }
+    }
+  }
+  return calls.length ? { calls, cleaned: content.slice(0, start).trim() } : { calls, cleaned: content.trim() };
 }
 
 // ===================================================================
@@ -774,6 +813,13 @@ async function runConversation() {
     off();
     state.currentChatId = null;
     if (res.ok && !res.aborted) view.setFinal(res.content || '', res.reasoning || '');
+    if (res.usage?.promptTokens && res.usage.contextLength) {
+      const { promptTokens, contextLength } = res.usage;
+      state.lastUsage = `Context: ${promptTokens.toLocaleString()} / ${contextLength.toLocaleString()} tokens`;
+      if (promptTokens >= contextLength * 0.95) {
+        addError(`The conversation (${promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${contextLength.toLocaleString()}), so the oldest messages — including your instructions — were cut off. Raise "Context window" in Settings (⚙) or start a New chat.`);
+      }
+    }
 
     if (!res.ok) {
       view.finish();
@@ -787,7 +833,7 @@ async function runConversation() {
 
     let content = res.content || '';
     let calls = res.toolCalls || [];
-    if (useTools && !calls.length && content.includes('<tool_call>')) {
+    if (useTools && !calls.length && textToolCallStart(content) >= 0) {
       const parsed = extractTextToolCalls(content);
       calls = parsed.calls;
       content = parsed.cleaned;
@@ -812,7 +858,7 @@ async function runConversation() {
     }
     if (step === MAX_AGENT_STEPS - 1) addError(`Stopped after ${MAX_AGENT_STEPS} steps. Send a message to let Qwen continue.`);
   }
-  setStatus(state.stopRequested ? 'Stopped.' : '');
+  setStatus(state.stopRequested ? 'Stopped.' : state.lastUsage || '');
 }
 
 function stopChat() {
@@ -846,6 +892,9 @@ renderer.code = function ({ text, lang }) {
   const filePath = info.slice(1).join(' ').replace(/^(path|file)=/, '');
   return `<pre data-lang="${escapeAttr(language)}" data-path="${escapeAttr(filePath)}"><code>${escapeHtml(text)}</code></pre>`;
 };
+// Models often write tags like <tool_call> or <vector> in prose; show them as text instead of
+// letting the sanitizer silently delete them.
+renderer.html = ({ text }) => escapeHtml(text);
 marked.setOptions({ renderer, gfm: true, breaks: false });
 
 function renderMarkdown(el, text) {
@@ -977,6 +1026,8 @@ function addAssistantMessage() {
       inlineThink += t;
       return '';
     });
+    const cut = textToolCallStart(visible);
+    if (cut >= 0) visible = visible.slice(0, cut);
     const allThink = (reasoning + inlineThink).trim();
     if (allThink) {
       think.classList.remove('hidden');
@@ -1264,7 +1315,7 @@ function applySettingsToUi() {
 
 function openSettings() {
   const s = state.settings;
-  for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize']) $(`#s-${k}`).value = s[k] ?? '';
+  for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize', 'contextLength']) $(`#s-${k}`).value = s[k] ?? '';
   for (const k of ['agentMode', 'includeCurrentFile', 'autoApproveEdits', 'autoApproveCommands']) $(`#s-${k}`).checked = !!s[k];
   $('#s-test-result').textContent = '';
   $('#settings-modal').classList.remove('hidden');
@@ -1275,6 +1326,7 @@ async function saveSettingsFromUi() {
   for (const k of ['provider', 'baseUrl', 'apiKey', 'model']) patch[k] = $(`#s-${k}`).value.trim();
   patch.temperature = parseFloat($('#s-temperature').value) || 0;
   patch.fontSize = parseInt($('#s-fontSize').value, 10) || 14;
+  patch.contextLength = Math.max(2048, parseInt($('#s-contextLength').value, 10) || 32768);
   for (const k of ['agentMode', 'includeCurrentFile', 'autoApproveEdits', 'autoApproveCommands']) patch[k] = $(`#s-${k}`).checked;
   state.settings = await api.setSettings(patch);
   $('#settings-modal').classList.add('hidden');

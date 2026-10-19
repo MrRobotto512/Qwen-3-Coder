@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   setWorkspace: (dir) => ipcRenderer.invoke('workspace:set', dir),
 
   list: (rel) => ipcRenderer.invoke('fs:list', rel),
-  listRecursive: (rel, limit) => ipcRenderer.invoke('fs:listRecursive', rel, limit),
+  listRecursive: (rel, limit, maxDepth) => ipcRenderer.invoke('fs:listRecursive', rel, limit, maxDepth),
   read: (rel) => ipcRenderer.invoke('fs:read', rel),
   exists: (rel) => ipcRenderer.invoke('fs:exists', rel),
   write: (rel, content) => ipcRenderer.invoke('fs:write', rel, content),
