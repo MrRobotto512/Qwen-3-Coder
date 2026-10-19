@@ -5,7 +5,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis portable",
+    "dist": "electron-builder --win nsis portable zip --x64",
     "dist:zip": "electron-builder --win zip"
   },
   "author": "",
@@ -35,12 +35,22 @@
     "win": {
       "target": [
         "nsis",
-        "portable"
-      ]
+        "portable",
+        "zip"
+      ],
+      "artifactName": "Qwen-Workspace-${version}-win-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Qwen-Workspace-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Qwen-Workspace-${version}-portable.${ext}"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MrRobotto512/Qwen-3-Coder.git"
   }
 }

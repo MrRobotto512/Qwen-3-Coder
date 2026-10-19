@@ -2,6 +2,10 @@
 
 A desktop coding workspace for Windows, powered by **Qwen**. It has a file explorer, a VS Code–style editor (Monaco), a terminal, and a Qwen chat panel that can read, search and edit your project. Every edit and command needs your approval.
 
+## Download
+
+Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Qwen-3-Coder/releases): the installer, a portable `.exe`, or a zip. The builds aren't code-signed, so Windows SmartScreen may warn you the first time. Click **More info → Run anyway**.
+
 ## Features
 
 - **Explorer:** open any project folder; create, delete and reveal files.
@@ -73,9 +77,10 @@ The dot next to the model name turns green when the app can reach the model serv
 ## 3. Build a Windows installer
 
 ```powershell
-npm run dist        # installer + portable .exe in dist/
-npm run dist:zip    # zipped app folder in dist/
+npm run dist        # installer, portable .exe and zip in dist/
 ```
+
+GitHub Actions also builds the app on every push to `main`; the builds are under **Actions → Build Windows app → Artifacts**. When you publish a release on GitHub, the same workflow attaches the installer, the portable .exe and the zip to it.
 
 ## Tips
 

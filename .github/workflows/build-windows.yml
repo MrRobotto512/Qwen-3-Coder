@@ -1,0 +1,43 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build installer, portable exe and zip
+        run: npx electron-builder --win nsis portable zip --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qwen-workspace-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+
+      - name: Attach builds to the release
+        if: github.event_name == 'release'
+        shell: bash
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.exe dist/*.zip --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
