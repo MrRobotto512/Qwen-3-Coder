@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; worker-src 'self' blob:; connect-src 'self'" />
+  <title>Qwen Workspace</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- These two must load before Monaco's AMD loader, otherwise they register as AMD modules instead of globals. -->
+  <script src="../../node_modules/dompurify/dist/purify.min.js"></script>
+  <script src="../../node_modules/marked/lib/marked.umd.js"></script>
+  <script src="../../node_modules/monaco-editor/min/vs/loader.js"></script>
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand"><span class="logo">Q</span> Qwen Workspace</div>
+    <button id="btn-open" class="tb-btn" title="Open folder (Ctrl+O)">📂 Open Folder</button>
+    <div id="ws-name" class="ws-name"></div>
+    <div class="spacer"></div>
+    <button id="btn-terminal" class="tb-btn" title="Toggle terminal (Ctrl+`)">⌨ Terminal</button>
+    <button id="btn-model" class="tb-btn model-badge" title="Model settings"><span class="dot" id="conn-dot"></span><span id="model-name">model</span></button>
+    <button id="btn-settings" class="tb-btn" title="Settings">⚙</button>
+  </header>
+
+  <main id="layout">
+    <aside id="sidebar">
+      <div class="panel-head">
+        <span>EXPLORER</span>
+        <div class="head-actions">
+          <button id="btn-new-file" title="New file">＋📄</button>
+          <button id="btn-new-folder" title="New folder">＋📁</button>
+          <button id="btn-refresh" title="Refresh">⟳</button>
+        </div>
+      </div>
+      <div id="tree" class="tree"></div>
+    </aside>
+    <div class="splitter v" data-target="sidebar" data-side="left"></div>
+
+    <section id="center">
+      <div id="tabs"></div>
+      <div id="editor-wrap">
+        <div id="editor"></div>
+        <div id="welcome">
+          <div class="welcome-inner">
+            <div class="logo big">Q</div>
+            <h1>Qwen Workspace</h1>
+            <p>Open a project folder, then ask Qwen to explain, write, refactor or debug your code.</p>
+            <button id="welcome-open" class="primary">📂 Open Folder</button>
+            <div id="welcome-recent"></div>
+            <ul class="tips">
+              <li><kbd>Ctrl</kbd>+<kbd>S</kbd> save · <kbd>Ctrl</kbd>+<kbd>`</kbd> terminal · <kbd>Ctrl</kbd>+<kbd>L</kbd> focus chat</li>
+              <li>Agent mode lets Qwen read, search and edit files. Every edit and command needs your approval.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="splitter h" data-target="terminal"></div>
+      <div id="terminal" class="hidden">
+        <div class="panel-head">
+          <span>TERMINAL <small id="term-shell"></small></span>
+          <div class="head-actions">
+            <button id="btn-term-clear" title="Clear">⌫</button>
+            <button id="btn-term-close" title="Close">✕</button>
+          </div>
+        </div>
+        <pre id="term-out"></pre>
+        <div class="term-input-row"><span class="prompt">&gt;</span><input id="term-in" placeholder="Run a command in the project folder (e.g. npm test)" spellcheck="false" /></div>
+      </div>
+    </section>
+
+    <div class="splitter v" data-target="chat" data-side="right"></div>
+    <aside id="chat">
+      <div class="panel-head">
+        <span>QWEN</span>
+        <div class="head-actions">
+          <label class="toggle" title="Agent mode: Qwen can use tools to read, search and edit your project">
+            <input type="checkbox" id="agent-toggle" /> Agent
+          </label>
+          <button id="btn-new-chat" title="New chat">＋ New chat</button>
+        </div>
+      </div>
+      <div id="messages">
+        <div class="chat-empty" id="chat-empty">
+          <p><b>Ask Qwen anything about your project.</b></p>
+          <div class="suggestions">
+            <button data-prompt="Give me an overview of this project: what it does, how it's structured, and how to run it.">Explain this project</button>
+            <button data-prompt="Review the current file for bugs and suggest improvements.">Review current file</button>
+            <button data-prompt="Write unit tests for the current file.">Write tests</button>
+            <button data-prompt="Find and fix the bug: ">Fix a bug…</button>
+          </div>
+        </div>
+      </div>
+      <div id="composer">
+        <div id="context-chips"></div>
+        <textarea id="prompt" rows="3" placeholder="Ask Qwen… (Enter to send, Shift+Enter for newline)"></textarea>
+        <div class="composer-actions">
+          <span id="status-text"></span>
+          <button id="btn-stop" class="danger hidden">■ Stop</button>
+          <button id="btn-send" class="primary">Send ➤</button>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Settings -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2>Model settings</h2>
+      <label>Provider
+        <select id="s-provider">
+          <option value="ollama">Ollama (local)</option>
+          <option value="lmstudio">LM Studio (local)</option>
+          <option value="dashscope">Alibaba Cloud Model Studio / DashScope</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="custom">Custom OpenAI-compatible</option>
+        </select>
+      </label>
+      <label>Base URL <input id="s-baseUrl" spellcheck="false" /></label>
+      <label>API key <input id="s-apiKey" type="password" placeholder="Not needed for Ollama / LM Studio" spellcheck="false" /></label>
+      <label>Model
+        <div class="row">
+          <input id="s-model" list="model-list" spellcheck="false" />
+          <datalist id="model-list"></datalist>
+          <button id="s-fetch-models">Fetch models</button>
+        </div>
+      </label>
+      <div id="s-test-result" class="hint"></div>
+      <div class="row two">
+        <label>Temperature <input id="s-temperature" type="number" min="0" max="2" step="0.1" /></label>
+        <label>Editor font size <input id="s-fontSize" type="number" min="9" max="32" /></label>
+      </div>
+      <label class="check"><input type="checkbox" id="s-agentMode" /> Agent mode (Qwen can use tools; needs a model with tool calling)</label>
+      <label class="check"><input type="checkbox" id="s-includeCurrentFile" /> Attach the open file to messages by default</label>
+      <label class="check"><input type="checkbox" id="s-autoApproveEdits" /> Auto-approve file edits</label>
+      <label class="check warn"><input type="checkbox" id="s-autoApproveCommands" /> Auto-approve terminal commands (risky)</label>
+      <div class="modal-actions">
+        <button id="s-cancel">Cancel</button>
+        <button id="s-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Diff viewer -->
+  <div id="diff-modal" class="modal hidden">
+    <div class="modal-box wide">
+      <div class="diff-head"><h2 id="diff-title">Review change</h2><button id="diff-close">✕</button></div>
+      <div id="diff-editor"></div>
+    </div>
+  </div>
+
+  <!-- Text prompt (Electron has no window.prompt) -->
+  <div id="input-modal" class="modal hidden">
+    <form class="modal-box small" id="input-form">
+      <h2 id="input-title"></h2>
+      <input id="input-value" spellcheck="false" />
+      <div class="modal-actions">
+        <button type="button" id="input-cancel">Cancel</button>
+        <button type="submit" class="primary">OK</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="ctx-menu" class="ctx-menu hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

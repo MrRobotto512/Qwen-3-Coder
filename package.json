@@ -1,0 +1,46 @@
+{
+  "name": "qwen-workspace",
+  "version": "0.1.0",
+  "description": "Desktop coding workspace powered by Qwen (Ollama, LM Studio, or any OpenAI-compatible API)",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis portable",
+    "dist:zip": "electron-builder --win zip"
+  },
+  "author": "",
+  "dependencies": {
+    "dompurify": "^3.4.17",
+    "marked": "^18.1.1",
+    "monaco-editor": "^0.57.0"
+  },
+  "devDependencies": {
+    "electron": "^44.9.0",
+    "electron-builder": "^26.15.3"
+  },
+  "productName": "Qwen Workspace",
+  "build": {
+    "appId": "com.qwenworkspace.app",
+    "productName": "Qwen Workspace",
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!node_modules/monaco-editor/{dev,esm,min-maps}/**",
+      "!node_modules/monaco-editor/node_modules/**",
+      "!**/*.map"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

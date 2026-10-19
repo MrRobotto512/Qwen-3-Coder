@@ -1,0 +1,439 @@
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const fsp = require('fs/promises');
+const { spawn } = require('child_process');
+
+const IGNORED_DIRS = new Set([
+  'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'out', '.next', '.nuxt',
+  '__pycache__', '.venv', 'venv', 'env', '.idea', '.vs', '.vscode', 'target', 'bin', 'obj',
+  '.cache', 'coverage', '.gradle', '.dart_tool', 'Pods'
+]);
+const MAX_READ_BYTES = 2 * 1024 * 1024;
+const MAX_CMD_OUTPUT = 60_000;
+
+const DEFAULT_SETTINGS = {
+  provider: 'ollama',
+  baseUrl: 'http://localhost:11434/v1',
+  apiKey: '',
+  model: 'qwen2.5-coder:7b',
+  temperature: 0.2,
+  agentMode: true,
+  autoApproveEdits: false,
+  autoApproveCommands: false,
+  includeCurrentFile: true,
+  lastWorkspace: null,
+  fontSize: 14
+};
+
+let mainWindow;
+let workspaceRoot = null;
+const chatControllers = new Map();
+
+// ---------- settings ----------
+function settingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+function loadSettings() {
+  try {
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+function saveSettings(s) {
+  fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
+  fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2));
+}
+
+// ---------- path safety ----------
+// Every file operation is confined to the open workspace folder.
+function resolveInWorkspace(p) {
+  if (!workspaceRoot) throw new Error('No workspace folder is open.');
+  const abs = path.resolve(workspaceRoot, p || '.');
+  const rel = path.relative(workspaceRoot, abs);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Path is outside the workspace: ${p}`);
+  }
+  return abs;
+}
+function toRel(abs) {
+  return path.relative(workspaceRoot, abs).split(path.sep).join('/') || '.';
+}
+
+async function isProbablyBinary(abs) {
+  const fh = await fsp.open(abs, 'r');
+  try {
+    const buf = Buffer.alloc(8000);
+    const { bytesRead } = await fh.read(buf, 0, 8000, 0);
+    return buf.subarray(0, bytesRead).includes(0);
+  } finally {
+    await fh.close();
+  }
+}
+
+async function walk(dir, out, limit, depth = 0) {
+  if (out.length >= limit || depth > 12) return;
+  let entries;
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const e of entries) {
+    if (out.length >= limit) return;
+    const abs = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (IGNORED_DIRS.has(e.name)) continue;
+      out.push(toRel(abs) + '/');
+      await walk(abs, out, limit, depth + 1);
+    } else if (e.isFile()) {
+      out.push(toRel(abs));
+    }
+  }
+}
+
+// ---------- window ----------
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1500,
+    height: 920,
+    minWidth: 900,
+    minHeight: 600,
+    backgroundColor: '#1e1e1e',
+    title: 'Qwen Workspace',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  Menu.setApplicationMenu(null);
+  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // Open external links in the default browser, never inside the app.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (url !== mainWindow.webContents.getURL()) {
+      e.preventDefault();
+      if (/^https?:/.test(url)) shell.openExternal(url);
+    }
+  });
+  // The renderer cancels unload when there are unsaved tabs; ask before discarding them.
+  mainWindow.webContents.on('will-prevent-unload', (e) => {
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'warning',
+      buttons: ['Close without saving', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: 'You have unsaved changes.',
+      detail: 'Close Qwen Workspace and discard them?'
+    });
+    if (choice === 0) e.preventDefault();
+  });
+  mainWindow.webContents.on('before-input-event', (_e, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12') mainWindow.webContents.toggleDevTools();
+  });
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+// ---------- IPC: settings ----------
+ipcMain.handle('settings:get', () => loadSettings());
+ipcMain.handle('settings:set', (_e, patch) => {
+  const s = { ...loadSettings(), ...patch };
+  saveSettings(s);
+  return s;
+});
+
+// ---------- IPC: workspace ----------
+ipcMain.handle('workspace:pick', async () => {
+  const r = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  return r.filePaths[0];
+});
+ipcMain.handle('workspace:set', async (_e, dir) => {
+  if (!dir) return null;
+  try {
+    const st = await fsp.stat(dir);
+    if (!st.isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  workspaceRoot = path.resolve(dir);
+  const s = loadSettings();
+  s.lastWorkspace = workspaceRoot;
+  saveSettings(s);
+  mainWindow.setTitle(`${path.basename(workspaceRoot)} — Qwen Workspace`);
+  return { root: workspaceRoot, name: path.basename(workspaceRoot), sep: path.sep, platform: process.platform };
+});
+
+// ---------- IPC: filesystem ----------
+ipcMain.handle('fs:list', async (_e, rel) => {
+  const abs = resolveInWorkspace(rel);
+  const entries = await fsp.readdir(abs, { withFileTypes: true });
+  return entries
+    .filter((e) => e.isDirectory() || e.isFile())
+    .filter((e) => !(e.isDirectory() && (e.name === '.git' || e.name === 'node_modules')))
+    .map((e) => ({ name: e.name, path: toRel(path.join(abs, e.name)), dir: e.isDirectory() }))
+    .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+});
+
+ipcMain.handle('fs:listRecursive', async (_e, rel, limit = 500) => {
+  const abs = resolveInWorkspace(rel);
+  const out = [];
+  await walk(abs, out, limit);
+  return { files: out, truncated: out.length >= limit };
+});
+
+ipcMain.handle('fs:read', async (_e, rel) => {
+  const abs = resolveInWorkspace(rel);
+  const st = await fsp.stat(abs);
+  if (!st.isFile()) throw new Error(`Not a file: ${rel}`);
+  if (st.size > MAX_READ_BYTES) throw new Error(`File is too large to open (${Math.round(st.size / 1024)} KB): ${rel}`);
+  if (await isProbablyBinary(abs)) throw new Error(`File looks binary: ${rel}`);
+  return fsp.readFile(abs, 'utf8');
+});
+
+ipcMain.handle('fs:exists', async (_e, rel) => {
+  try {
+    await fsp.access(resolveInWorkspace(rel));
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle('fs:write', async (_e, rel, content) => {
+  const abs = resolveInWorkspace(rel);
+  await fsp.mkdir(path.dirname(abs), { recursive: true });
+  await fsp.writeFile(abs, content, 'utf8');
+  return true;
+});
+
+ipcMain.handle('fs:mkdir', async (_e, rel) => {
+  await fsp.mkdir(resolveInWorkspace(rel), { recursive: true });
+  return true;
+});
+
+ipcMain.handle('fs:delete', async (_e, rel) => {
+  const abs = resolveInWorkspace(rel);
+  if (abs === workspaceRoot) throw new Error('Refusing to delete the workspace root.');
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Delete', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    message: `Delete "${rel}"?`,
+    detail: 'This cannot be undone.'
+  });
+  if (response !== 0) return false;
+  await fsp.rm(abs, { recursive: true, force: true });
+  return true;
+});
+
+ipcMain.handle('fs:search', async (_e, query, opts = {}) => {
+  if (!query) return [];
+  const files = [];
+  await walk(resolveInWorkspace('.'), files, 5000);
+  let re;
+  try {
+    re = opts.regex ? new RegExp(query, 'i') : null;
+  } catch (err) {
+    throw new Error(`Invalid regex: ${err.message}`);
+  }
+  const needle = query.toLowerCase();
+  const results = [];
+  for (const f of files) {
+    if (f.endsWith('/')) continue;
+    const abs = path.join(workspaceRoot, f);
+    try {
+      const st = await fsp.stat(abs);
+      if (st.size > 1024 * 1024 || (await isProbablyBinary(abs))) continue;
+      const lines = (await fsp.readFile(abs, 'utf8')).split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const hit = re ? re.test(lines[i]) : lines[i].toLowerCase().includes(needle);
+        if (hit) {
+          results.push({ path: f, line: i + 1, text: lines[i].trim().slice(0, 200) });
+          if (results.length >= (opts.limit || 100)) return results;
+        }
+      }
+    } catch {
+      /* unreadable file, skip */
+    }
+  }
+  return results;
+});
+
+ipcMain.handle('shell:reveal', (_e, rel) => shell.showItemInFolder(resolveInWorkspace(rel)));
+
+// ---------- IPC: commands ----------
+ipcMain.handle('cmd:run', (_e, command, timeoutMs = 120_000) => {
+  const cwd = resolveInWorkspace('.');
+  return new Promise((resolve) => {
+    const child = spawn(command, { cwd, shell: true, windowsHide: true, env: process.env });
+    let output = '';
+    const append = (d) => {
+      output += d.toString();
+      mainWindow?.webContents.send('cmd:output', d.toString());
+      if (output.length > MAX_CMD_OUTPUT * 2) output = output.slice(-MAX_CMD_OUTPUT);
+    };
+    child.stdout.on('data', append);
+    child.stderr.on('data', append);
+    const timer = setTimeout(() => {
+      append(`\n[timed out after ${timeoutMs / 1000}s — process killed]\n`);
+      killTree(child);
+    }, timeoutMs);
+    child.on('error', (err) => append(`\n[error] ${err.message}\n`));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (output.length > MAX_CMD_OUTPUT) output = '[...output truncated...]\n' + output.slice(-MAX_CMD_OUTPUT);
+      resolve({ code, output });
+    });
+  });
+});
+
+function killTree(child) {
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+  } else {
+    child.kill('SIGKILL');
+  }
+}
+
+// ---------- IPC: model ----------
+function apiHeaders(s) {
+  const h = { 'Content-Type': 'application/json' };
+  if (s.apiKey) h.Authorization = `Bearer ${s.apiKey}`;
+  return h;
+}
+function apiUrl(s, suffix) {
+  return s.baseUrl.trim().replace(/\/+$/, '') + suffix;
+}
+
+ipcMain.handle('model:list', async () => {
+  const s = loadSettings();
+  const res = await fetch(apiUrl(s, '/models'), { headers: apiHeaders(s), signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const json = await res.json();
+  return (json.data || json.models || []).map((m) => m.id || m.name).filter(Boolean).sort();
+});
+
+ipcMain.handle('chat:abort', (_e, id) => {
+  chatControllers.get(id)?.abort();
+  return true;
+});
+
+// Streams one completion. Deltas are pushed to the renderer as they arrive;
+// the resolved value is the full assistant turn (text + any tool calls).
+ipcMain.handle('chat:stream', async (event, id, payload) => {
+  const s = loadSettings();
+  const controller = new AbortController();
+  chatControllers.set(id, controller);
+  const send = (type, data) => {
+    if (!event.sender.isDestroyed()) event.sender.send('chat:event', { id, type, data });
+  };
+
+  const body = {
+    model: s.model,
+    messages: payload.messages,
+    stream: true,
+    temperature: Number(s.temperature)
+  };
+  if (payload.tools?.length) body.tools = payload.tools;
+
+  try {
+    const res = await fetch(apiUrl(s, '/chat/completions'), {
+      method: 'POST',
+      headers: apiHeaders(s),
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status} from ${s.baseUrl}: ${text.slice(0, 600)}`);
+    }
+
+    let content = '';
+    let reasoning = '';
+    const toolCalls = [];
+    let finishReason = null;
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    const handleChunk = (json) => {
+      const choice = json.choices?.[0];
+      if (!choice) return;
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+      const d = choice.delta || choice.message || {};
+      const r = d.reasoning_content ?? d.reasoning;
+      if (typeof r === 'string' && r) {
+        reasoning += r;
+        send('reasoning', r);
+      }
+      if (typeof d.content === 'string' && d.content) {
+        content += d.content;
+        send('delta', d.content);
+      }
+      if (Array.isArray(d.tool_calls)) {
+        for (const tc of d.tool_calls) {
+          let i = tc.index;
+          if (i === undefined) {
+            const found = tc.id ? toolCalls.findIndex((t) => t.id === tc.id) : -1;
+            i = found >= 0 ? found : tc.id || toolCalls.length === 0 ? toolCalls.length : toolCalls.length - 1;
+          }
+          const slot = (toolCalls[i] ||= { id: '', type: 'function', function: { name: '', arguments: '' } });
+          if (tc.id) slot.id = tc.id;
+          if (tc.function?.name && !slot.function.name) slot.function.name = tc.function.name;
+          const args = tc.function?.arguments;
+          if (args !== undefined && args !== null) {
+            slot.function.arguments += typeof args === 'string' ? args : JSON.stringify(args);
+          }
+          send('tool_progress', toolCalls.filter(Boolean).map((t) => t.function.name));
+        }
+      }
+    };
+
+    for await (const chunk of res.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          handleChunk(JSON.parse(data));
+        } catch {
+          /* ignore malformed keep-alive lines */
+        }
+      }
+    }
+
+    const calls = toolCalls.filter(Boolean).map((t, i) => ({ ...t, id: t.id || `call_${Date.now()}_${i}` }));
+    return { ok: true, content, reasoning, toolCalls: calls, finishReason };
+  } catch (err) {
+    if (err.name === 'AbortError') return { ok: true, aborted: true };
+    let msg = err.message;
+    if (err.cause?.code === 'ECONNREFUSED') {
+      msg = `Could not connect to ${s.baseUrl}. Is Ollama / LM Studio running? (${err.cause.code})`;
+    }
+    return { ok: false, error: msg };
+  } finally {
+    chatControllers.delete(id);
+  }
+});
