@@ -1,0 +1,7 @@
+{
+  "name": "Software factory",
+  "description": "A spec → build → review → decide pipeline. Ask Qwen to \"run the factory: <feature>\" and it builds the feature on its own branch, reviews it, and writes a record of each stage.",
+  "icon": "factory",
+  "adds": ".qwen/skills/factory and a factory/ folder",
+  "then": "In Agent mode, say: run the factory: <describe a feature>"
+}

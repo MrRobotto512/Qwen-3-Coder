@@ -62,6 +62,7 @@ const state = {
   modelsMode: 'standard', // or 'long' (YaRN builds) in the Models window
   hf: new Map(), // Hugging Face repo -> resolved YaRN build ({ status, ollamaId, sizeGB, ... })
   modelInfo: null, // { contextLength, rope } of the model in use, from Ollama
+  mcp: [], // connected MCP servers and their tools
   warned: new Set() // one-time notices already shown this session
 };
 
@@ -134,6 +135,7 @@ require(['vs/editor/editor.main'], async () => {
   applySettingsToUi();
   checkConnection();
   initUpdates();
+  initMcp();
 
   if (state.settings.lastWorkspace) await openWorkspace(state.settings.lastWorkspace, true);
   renderAll();
@@ -813,6 +815,9 @@ function renderHome() {
           ...QUICK_ACTIONS.map((a) => el('button', { class: 'action-card', onclick: () => setPrompt(a.prompt, !a.fill) },
             iconEl(a.icon), el('span', { class: 't', text: a.title }), el('span', { class: 'd', text: a.desc })))))
     );
+    const workflows = el('div', { class: 'home-section' });
+    inner.append(workflows);
+    renderWorkflows(workflows);
     const changes = state.conv?.changes;
     if (changes?.size) {
       inner.append(el('div', { class: 'home-section' }, el('h3', { text: `Changed in this conversation (${changes.size})` }),
@@ -827,6 +832,53 @@ function renderHome() {
     );
   }
   home.replaceChildren(inner);
+}
+
+// Workflows are bundled starter trees (e.g. the software factory) installed into the project.
+async function renderWorkflows(section) {
+  let templates = [];
+  try {
+    templates = await api.templatesList();
+  } catch {
+    return;
+  }
+  if (!templates.length || !state.ws) return;
+  const installed = new Set();
+  for (const t of templates) if (await api.exists(`.qwen/skills/${t.id === 'software-factory' ? 'factory' : t.id}`).catch(() => false)) installed.add(t.id);
+  section.replaceChildren(
+    el('h3', { text: 'Workflows' }),
+    el('div', { class: 'actions-grid' }, ...templates.map((t) =>
+      el('button', { class: 'action-card', title: t.description, onclick: () => installWorkflow(t) },
+        iconEl(t.icon),
+        el('span', { class: 't' }, t.name, installed.has(t.id) ? el('span', { class: 'tagb inst', text: 'Installed' }) : null),
+        el('span', { class: 'd', text: t.description }))))
+  );
+}
+
+async function installWorkflow(t) {
+  if (!requireWorkspace()) return;
+  let res;
+  try {
+    res = await api.templatesInstall(t.id);
+  } catch (e) {
+    return alert(cleanError(e));
+  }
+  for (const c of state.convs.values()) c.memoryLoaded = false; // skills list changed
+  state.fileIndex = null;
+  renderTree();
+  renderHome();
+  const added = res.written.length;
+  toast({
+    key: 'workflow',
+    icon: 'check',
+    text: added
+      ? [el('b', { text: `${t.name} installed.` }), ` ${t.then || 'Ask Qwen to run it.'}`]
+      : [el('b', { text: `${t.name} is already installed.` }), ` ${res.skipped.length} files were already there.`],
+    actions: t.then && /run the factory/i.test(t.then)
+      ? [{ label: 'Later' }, { label: 'Start a job', primary: true, onClick: () => setPrompt('run the factory: ', false) }]
+      : [],
+    timeout: 20000
+  });
 }
 
 // ===================================================================
@@ -1109,6 +1161,24 @@ const TOOL_SEARCH_TOOL = {
 
 const ALL_TOOLS = [...CORE_TOOLS, ...DEFERRED_TOOLS, LOAD_SKILL_TOOL, TOOL_SEARCH_TOOL];
 
+// MCP tools are deferred too: their servers can expose many of them, so only their names go in
+// the prompt and tool_search loads the ones a task needs. state.mcp holds the live list.
+function mcpToolSpecs() {
+  const out = [];
+  for (const srv of state.mcp || []) {
+    if (srv.status !== 'ready') continue;
+    for (const t of srv.tools || []) {
+      out.push({ type: 'function', function: { name: t.name, description: `[${srv.id}] ${t.description || t.rawName}`, parameters: t.parameters || { type: 'object', properties: {} } } });
+    }
+  }
+  return out;
+}
+
+// Every deferred tool, built-in and MCP, for tool_search and text-call parsing.
+function deferredCatalog() {
+  return [...DEFERRED_TOOLS, ...mcpToolSpecs()];
+}
+
 // The tool list for one request. It only changes when skills appear or tool_search loads a
 // deferred tool, because Qwen's template puts the tools inside the cached system prompt.
 const WEB_TOOLS = new Set(['web_search', 'fetch_url']);
@@ -1116,9 +1186,10 @@ const WEB_TOOLS = new Set(['web_search', 'fetch_url']);
 function toolsFor(c) {
   const active = new Set(c.activeTools || []);
   const core = state.settings.webResearch === false ? CORE_TOOLS.filter((t) => !WEB_TOOLS.has(t.function.name)) : CORE_TOOLS;
-  const tools = [...core, ...DEFERRED_TOOLS.filter((t) => active.has(t.function.name))];
+  const deferred = deferredCatalog();
+  const tools = [...core, ...deferred.filter((t) => active.has(t.function.name))];
   if (c.skills?.length) tools.push(LOAD_SKILL_TOOL);
-  if (DEFERRED_TOOLS.some((t) => !active.has(t.function.name))) tools.push(TOOL_SEARCH_TOOL);
+  if (deferred.some((t) => !active.has(t.function.name))) tools.push(TOOL_SEARCH_TOOL);
   return tools;
 }
 
@@ -1177,7 +1248,7 @@ async function loadProjectMemory() {
 function systemPrompt(c) {
   const agent = state.settings.agentMode && !!state.ws;
   const web = agent && state.settings.webResearch !== false;
-  const key = `${agent}|${web}|${c.workspace}|${c.memory?.text || ''}|${(c.skills || []).map((sk) => `${sk.name}:${sk.description}`).join(',')}`;
+  const key = `${agent}|${web}|${mcpToolSpecs().map((t) => t.function.name).join(',')}|${c.workspace}|${c.memory?.text || ''}|${(c.skills || []).map((sk) => `${sk.name}:${sk.description}`).join(',')}`;
   if (c.sysPrompt?.key === key) return c.sysPrompt.text;
   const win = state.ws?.platform === 'win32';
   const parts = [
@@ -1191,7 +1262,9 @@ function systemPrompt(c) {
     agent && c.skills?.length
       ? `<skills>\nTask-specific instructions. When a task matches one, call load_skill with its name before starting.\n${c.skills.map((sk) => `- ${sk.name}: ${sk.description}`).join('\n')}\n</skills>`
       : null,
-    agent ? `<deferred_tools>\nAvailable but not loaded. Call tool_search to load them when you need one.\n${DEFERRED_TOOLS.map((t) => `- ${t.function.name}: ${t.function.description.split('. ')[0]}`).join('\n')}\n</deferred_tools>` : null,
+    agent && deferredCatalog().length
+      ? `<deferred_tools>\nAvailable but not loaded. Call tool_search to load them when you need one. Tools named mcp__<server>__<tool> come from connected MCP servers.\n${deferredCatalog().map((t) => `- ${t.function.name}: ${t.function.description.split('. ')[0]}`).join('\n')}\n</deferred_tools>`
+      : null,
     '</context>',
     '',
     '<instructions>'
@@ -1261,7 +1334,18 @@ function requestMessages(c) {
   return [{ role: 'system', content: systemPrompt(c) }, ...msgs];
 }
 
+function mcpServerOf(name) {
+  return (/^mcp__([a-z0-9_]+)__/.exec(name) || [])[1] || 'mcp';
+}
+function mcpToolShort(name) {
+  return name.replace(/^mcp__[a-z0-9_]+__/, '');
+}
+
 function describeCall(name, args) {
+  if (name.startsWith('mcp__')) {
+    const a = args.path || args.url || args.query || args.file || args.command || '';
+    return { target: `${mcpToolShort(name)}${a ? ` · ${String(a).slice(0, 60)}` : ''}`, title: `${name} ${JSON.stringify(args).slice(0, 200)}` };
+  }
   switch (name) {
     case 'list_files': {
       const p = normPath(args.path || '.');
@@ -1331,7 +1415,10 @@ function isAllowedCommand(cmd) {
   const c = cmd.trim().toLowerCase();
   return (state.settings.allowedCommands || []).some((p) => {
     const pre = p.trim().toLowerCase();
-    return pre && (c === pre || c.startsWith(pre + ' '));
+    if (!pre) return false;
+    // MCP allow-entries end in "__" and match by prefix; shell commands match whole words.
+    if (pre.endsWith('__')) return c.startsWith(pre);
+    return c === pre || c.startsWith(pre + ' ');
   });
 }
 
@@ -1360,6 +1447,22 @@ async function executeTool(c, call, row) {
   }
   // Only the conversation on screen moves the editor around.
   const follow = state.settings.followAgent && c === state.conv;
+  // MCP tools run on their server. They are not read-only, so they are barriers (run alone)
+  // and go through command approval, since a server tool can run or change things.
+  if (name.startsWith('mcp__')) {
+    const label = mcpServerOf(name);
+    if (needsApproval('command', name)) {
+      const ok = await row.requestApproval({ kind: 'mcp', question: `Let the "${label}" MCP server run ${mcpToolShort(name)}?`, server: label, tool: mcpToolShort(name), args: call.function.arguments });
+      if (!ok) return { result: 'The user declined to run this MCP tool. Do not retry it; ask the user how they would like to proceed.', rejected: true };
+    }
+    try {
+      const r = await api.mcpCall(name, args);
+      row.setBody(r.text);
+      return { result: truncate(r.text), meta: r.isError ? 'error' : 'done', failed: r.isError };
+    } catch (e) {
+      return { result: `Error calling ${name}: ${cleanError(e)}` };
+    }
+  }
   try {
     switch (name) {
       case 'list_files': {
@@ -1476,8 +1579,9 @@ async function executeTool(c, call, row) {
       }
       case 'tool_search': {
         const words = String(args.query || '').toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 2);
-        const matches = DEFERRED_TOOLS.filter((t) => !words.length || words.some((w) => `${t.function.name} ${t.function.description}`.toLowerCase().includes(w)));
-        if (!matches.length) return { result: `No matching tools. Deferred tools: ${DEFERRED_TOOLS.map((t) => t.function.name).join(', ')}.`, meta: 'none found' };
+        const catalog = deferredCatalog();
+        const matches = catalog.filter((t) => !words.length || words.some((w) => `${t.function.name} ${t.function.description}`.toLowerCase().includes(w))).slice(0, 12);
+        if (!matches.length) return { result: `No matching tools. Deferred tools: ${catalog.map((t) => t.function.name).join(', ')}.`, meta: 'none found' };
         c.activeTools = [...new Set([...(c.activeTools || []), ...matches.map((t) => t.function.name)])];
         const out = matches.map((t) => `${t.function.name}: ${t.function.description}\nParameters: ${JSON.stringify(t.function.parameters.properties)}`).join('\n\n');
         row.setBody(out);
@@ -1602,11 +1706,16 @@ function truncate(s) {
 //   (Qwen2.5-Coder in Ollama does this). Only objects naming one of our tools count, so
 //   ordinary JSON in an answer is left alone.
 const TOOL_TEXT_MARKER = /<tool_call>|<function=[\w.-]+>/;
-const JSON_TOOL_CALL = new RegExp(`(?:\`\`\`[\\w-]*[ \\t]*\\r?\\n\\s*)?\\{\\s*"name"\\s*:\\s*"(?:${ALL_TOOLS.map((t) => t.function.name).join('|')})"`);
+function allToolNames() {
+  return [...ALL_TOOLS, ...mcpToolSpecs()].map((t) => t.function.name);
+}
+function jsonToolCallRe() {
+  return new RegExp(`(?:\`\`\`[\\w-]*[ \\t]*\\r?\\n\\s*)?\\{\\s*"name"\\s*:\\s*"(?:${allToolNames().map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})"`);
+}
 const MULTILINE_PARAMS = new Set(['content', 'old_text', 'new_text']);
 
 function textToolCallStart(content) {
-  const indexes = [TOOL_TEXT_MARKER.exec(content), JSON_TOOL_CALL.exec(content)].filter(Boolean).map((m) => m.index);
+  const indexes = [TOOL_TEXT_MARKER.exec(content), jsonToolCallRe().exec(content)].filter(Boolean).map((m) => m.index);
   return indexes.length ? Math.min(...indexes) : -1;
 }
 
@@ -1658,7 +1767,7 @@ function extractTextToolCalls(content) {
       add(fm[1], args);
     }
   } else if (!tail.includes('<tool_call>')) {
-    const known = new Set(ALL_TOOLS.map((t) => t.function.name));
+    const known = new Set(allToolNames());
     const re = /\{\s*"name"\s*:/g;
     let m;
     while ((m = re.exec(tail))) {
@@ -2573,7 +2682,9 @@ function makeStepRow(c, container, call, rec) {
     /* shown raw below */
   }
   const name = call.function.name;
-  const info = TOOL_INFO[name] || { icon: 'sparkles', verb: name, doing: 'Running' };
+  const info = TOOL_INFO[name] || (name.startsWith('mcp__')
+    ? { icon: 'plug', verb: mcpServerOf(name), doing: `Running ${mcpServerOf(name)}` }
+    : { icon: 'sparkles', verb: name, doing: 'Running' });
   const d = describeCall(name, args);
   const body = el('pre');
   const meta = el('span', { class: 'step-meta' });
@@ -2749,6 +2860,21 @@ function makeStepRow(c, container, call, rec) {
               el('button', { class: 'primary', onclick: () => finish(true) }, iconEl('check'), 'Approve'))
           );
           if (state.settings.followAgent && c === state.conv) review();
+        } else if (opts.kind === 'mcp') {
+          let argText = opts.args || '{}';
+          try {
+            argText = JSON.stringify(JSON.parse(opts.args || '{}'), null, 2);
+          } catch {
+            /* show raw */
+          }
+          bar.append(
+            el('div', { class: 'q' }, el('span', { text: opts.question })),
+            el('div', { class: 'cmd', text: argText }),
+            el('div', { class: 'btns' },
+              el('button', { class: 'ghost danger-text', onclick: () => finish(false) }, 'Reject'),
+              el('button', { class: 'ghost', title: `Run ${opts.tool} and future "${opts.server}" tools without asking`, onclick: async () => { await allowCommandPrefix(`mcp__${opts.server}__`); finish(true); } }, `Always allow “${opts.server}”`),
+              el('button', { class: 'primary', onclick: () => finish(true) }, iconEl('play'), 'Run'))
+          );
         } else {
           const prefix = commandPrefix(opts.command);
           bar.append(
@@ -3040,6 +3166,78 @@ function showAttachMenu(anchor) {
   ].filter(Boolean), { above: true });
 }
 
+// Splits a server command line into command + args, respecting simple quotes. A value that
+// looks like a URL becomes an http transport instead.
+function parseServerCommand(text) {
+  const t = text.trim();
+  if (/^https?:\/\//i.test(t)) return { url: t, type: 'http' };
+  const parts = t.match(/"[^"]*"|'[^']*'|\S+/g) || [];
+  const clean = parts.map((x) => x.replace(/^["']|["']$/g, ''));
+  return { command: clean[0], args: clean.slice(1) };
+}
+
+function serverSummary(cfg) {
+  if (cfg.url) return cfg.url;
+  return [cfg.command, ...(cfg.args || [])].join(' ');
+}
+
+function renderMcpSettings() {
+  const list = $('#mcp-list');
+  const configs = state.settings.mcpServers || [];
+  if (!configs.length) {
+    list.replaceChildren(el('div', { class: 'hint', text: 'No servers yet. For example, add REA with command: npx -y rea-agents mcp' }));
+    return;
+  }
+  list.replaceChildren(...configs.map((cfg) => {
+    const live = state.mcp.find((m) => m.id === sanitizeServerId(cfg.name));
+    const status = cfg.enabled === false ? 'off' : live?.status || 'connecting';
+    const sub = status === 'ready' ? `${live.tools.length} tools · ${serverSummary(cfg)}` : status === 'error' || status === 'disconnected' ? live?.error || 'Failed to connect' : status === 'off' ? `Disabled · ${serverSummary(cfg)}` : serverSummary(cfg);
+    return el('div', { class: 'mcp-item' },
+      el('span', { class: `dot ${status}` }),
+      el('div', { class: 'mcp-main' },
+        el('div', { class: 'mcp-name', text: cfg.name }),
+        el('div', { class: `mcp-sub${status === 'error' || status === 'disconnected' ? ' bad' : ''}`, title: sub, text: sub })),
+      el('label', { class: 'toggle', title: 'Enable or disable this server' },
+        el('input', { type: 'checkbox', checked: cfg.enabled !== false, onchange: (e) => toggleServer(cfg.name, e.target.checked) })),
+      el('button', { class: 'icon-btn', title: 'Remove', onclick: () => removeServer(cfg.name) }, iconEl('trash')));
+  }));
+}
+
+// Mirror of the main process id rule, so the UI matches live server ids.
+function sanitizeServerId(name) {
+  return String(name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+}
+
+async function addServerFromForm() {
+  const name = $('#mcp-new-name').value.trim();
+  const cmd = $('#mcp-new-cmd').value.trim();
+  if (!name || !cmd) return flash('Give the server a name and a command.');
+  if (!sanitizeServerId(name)) return flash('Use letters or numbers in the name.');
+  const configs = (state.settings.mcpServers || []).filter((c) => sanitizeServerId(c.name) !== sanitizeServerId(name));
+  configs.push({ name, ...parseServerCommand(cmd), enabled: true });
+  await saveServers(configs);
+  $('#mcp-new-name').value = '';
+  $('#mcp-new-cmd').value = '';
+}
+
+async function toggleServer(name, enabled) {
+  const configs = (state.settings.mcpServers || []).map((c) => (c.name === name ? { ...c, enabled } : c));
+  await saveServers(configs);
+}
+
+async function removeServer(name) {
+  if (!confirm(`Remove the "${name}" MCP server?`)) return;
+  await saveServers((state.settings.mcpServers || []).filter((c) => c.name !== name));
+}
+
+async function saveServers(configs) {
+  state.settings = await api.setSettings({ mcpServers: configs });
+  renderMcpSettings();
+  state.mcp = await api.mcpReconnect();
+  renderMcpStatus();
+  renderMcpSettings();
+}
+
 function renderSearchFields() {
   const p = $('#s-searchProvider').value;
   $('#s-brave-row').classList.toggle('hidden', p !== 'brave');
@@ -3056,6 +3254,7 @@ function openSettings() {
   $('#about-version').textContent = state.appInfo?.version || '';
   $('#about-kind').textContent = KIND_TEXT[state.appInfo?.kind] || '';
   renderUpdateUi();
+  renderMcpSettings();
   $('#s-approvalMode').value = approvalMode();
   $('#s-allowedCommands').value = (s.allowedCommands || []).join(', ');
   $('#s-test-result').textContent = '';
@@ -3199,6 +3398,37 @@ const KIND_TEXT = {
   zip: 'Zip version: updates open the download page.',
   dev: 'Running from source: update with git pull.'
 };
+
+async function initMcp() {
+  try {
+    state.mcp = await api.mcpList();
+  } catch {
+    state.mcp = [];
+  }
+  renderMcpStatus();
+  api.onMcpChanged((list) => {
+    state.mcp = list;
+    renderMcpStatus();
+    if (!$('#settings-modal').classList.contains('hidden')) renderMcpSettings();
+  });
+}
+
+// A small indicator in the status bar: how many MCP servers are connected, and any errors.
+function renderMcpStatus() {
+  const el2 = $('#sb-mcp');
+  if (!el2) return;
+  const ready = state.mcp.filter((s) => s.status === 'ready');
+  const errored = state.mcp.filter((s) => s.status === 'error' || s.status === 'disconnected');
+  if (!state.mcp.length) {
+    el2.classList.add('hidden');
+    return;
+  }
+  el2.classList.remove('hidden');
+  el2.classList.toggle('bad', errored.length > 0);
+  const tools = ready.reduce((n, s) => n + s.tools.length, 0);
+  el2.lastChild.textContent = errored.length ? `MCP: ${errored.length} failed` : `MCP: ${ready.length} server${ready.length === 1 ? '' : 's'} · ${tools} tools`;
+  el2.title = state.mcp.map((s) => `${s.id}: ${s.status}${s.error ? ` — ${s.error}` : ` (${s.tools.length} tools)`}`).join('\n');
+}
 
 async function initUpdates() {
   state.appInfo = await api.appInfo();
@@ -3769,6 +3999,8 @@ function bindUi() {
   };
   $('#s-fetch-models').onclick = fetchModels;
   $('#s-searchProvider').onchange = renderSearchFields;
+  $('#mcp-add-btn').onclick = addServerFromForm;
+  $('#sb-mcp').onclick = openSettings;
   $('#s-save').onclick = saveSettingsFromUi;
   $('#s-cancel').onclick = () => $('#settings-modal').classList.add('hidden');
   $('#s-close').onclick = () => $('#settings-modal').classList.add('hidden');

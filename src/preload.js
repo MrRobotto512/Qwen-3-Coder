@@ -47,8 +47,22 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('ollama:pull-progress', fn);
   },
 
+  mcpList: () => ipcRenderer.invoke('mcp:list'),
+  mcpReconnect: () => ipcRenderer.invoke('mcp:reconnect'),
+  mcpConnectOne: (cfg) => ipcRenderer.invoke('mcp:connectOne', cfg),
+  mcpDisconnect: (id) => ipcRenderer.invoke('mcp:disconnect', id),
+  mcpCall: (name, args, timeout) => ipcRenderer.invoke('mcp:call', name, args, timeout),
+  onMcpChanged: (cb) => {
+    const fn = (_e, list) => cb(list);
+    ipcRenderer.on('mcp:changed', fn);
+    return () => ipcRenderer.removeListener('mcp:changed', fn);
+  },
+
   webSearch: (query) => ipcRenderer.invoke('web:search', query),
   webFetch: (url) => ipcRenderer.invoke('web:fetch', url),
+
+  templatesList: () => ipcRenderer.invoke('templates:list'),
+  templatesInstall: (id) => ipcRenderer.invoke('templates:install', id),
 
   skillsList: () => ipcRenderer.invoke('skills:list'),
   skillsRead: (id, file) => ipcRenderer.invoke('skills:read', id, file),

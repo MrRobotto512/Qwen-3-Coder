@@ -528,3 +528,18 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .chip-btn:hover { border-color: var(--accent); color: var(--text); }
 .chip-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .ask-input { width: 100%; font-size: 12.5px; padding: 5px 8px; }
+
+/* ---------- MCP servers ---------- */
+#sb-mcp.bad { color: var(--red); }
+.mcp-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-1); margin-bottom: 6px; }
+.mcp-item .dot { flex: none; }
+.mcp-item .dot.ready { background: var(--green); box-shadow: 0 0 0 3px var(--green-bg); }
+.mcp-item .dot.connecting { background: var(--yellow); }
+.mcp-item .dot.error, .mcp-item .dot.disconnected { background: var(--red); box-shadow: 0 0 0 3px var(--red-bg); }
+.mcp-item .mcp-main { flex: 1; min-width: 0; }
+.mcp-item .mcp-name { font-weight: 600; }
+.mcp-item .mcp-sub { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-item .mcp-sub.bad { color: var(--red); }
+.mcp-add { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 4px; }
+.mcp-add input { width: 100%; }
+.mcp-add button { justify-self: start; }

@@ -159,6 +159,7 @@
     <button class="sb" id="sb-terminal" title="Toggle terminal (Ctrl+`)"><span data-icon="terminal"></span><span>Terminal</span></button>
     <div class="spacer"></div>
     <span class="sb" id="sb-status"></span>
+    <button class="sb hidden" id="sb-mcp" title="MCP servers"><span data-icon="plug"></span><span></span></button>
     <button class="sb sb-update hidden" id="sb-update"><span data-icon="download"></span><span id="sb-update-text"></span></button>
     <span class="sb" id="sb-cursor"></span>
     <span class="sb" id="sb-lang"></span>
@@ -210,6 +211,15 @@
         <input id="s-allowedCommands" placeholder="e.g. npm test, cmake, git status" spellcheck="false" />
         <span class="hint">Commands starting with these run without asking in Auto-edit mode. Separate with commas.</span>
       </label>
+
+      <div class="section-title">Tools &amp; MCP servers</div>
+      <div class="hint">MCP servers add tools Qwen can use (e.g. reverse engineering, databases, browsers). Qwen loads a server's tools only when a task needs them, and each call needs your approval. Node-based servers need Node.js installed.</div>
+      <div id="mcp-list"></div>
+      <div class="mcp-add">
+        <input id="mcp-new-name" placeholder="Name (e.g. rea)" spellcheck="false" />
+        <input id="mcp-new-cmd" placeholder="Command, e.g. npx -y rea-agents mcp   (or paste an https:// URL)" spellcheck="false" />
+        <button id="mcp-add-btn" class="ghost"><span data-icon="plus"></span>Add server</button>
+      </div>
 
       <div class="section-title">Research</div>
       <label class="check"><input type="checkbox" id="s-webResearch" /> Let Qwen search the web and read pages (web_search, fetch_url)</label>

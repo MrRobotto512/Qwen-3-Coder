@@ -1,0 +1,2 @@
+# Factory job folders are runtime state
+/factory/jobs/*/

@@ -1,6 +1,6 @@
 {
   "name": "qwen-workspace",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Desktop coding workspace powered by Qwen (Ollama, LM Studio, or any OpenAI-compatible API)",
   "main": "src/main.js",
   "scripts": {
@@ -10,6 +10,7 @@
   },
   "author": "",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "dompurify": "^3.4.17",
     "electron-updater": "^6.8.9",
     "marked": "^18.1.1",
@@ -25,6 +26,7 @@
     "productName": "Qwen Workspace",
     "files": [
       "src/**/*",
+      "templates/**/*",
       "package.json",
       "!node_modules/monaco-editor/{dev,esm,min-maps}/**",
       "!node_modules/monaco-editor/node_modules/**",

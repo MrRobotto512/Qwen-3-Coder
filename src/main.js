@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const updater = require('./updater');
 const { detectSpecs } = require('./hardware');
 const web = require('./web');
+const mcp = require('./mcp');
 
 const IGNORED_DIRS = new Set([
   'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'out', '.next', '.nuxt',
@@ -36,6 +37,7 @@ const DEFAULT_SETTINGS = {
   searchApiKey: '',
   searxngUrl: '',
   allowPrivateFetch: false,
+  mcpServers: [], // [{ name, command, args, env, url, type, cwd, enabled }]
   lastConversations: {}, // workspace root -> id of the conversation open when the app closed
   lastWorkspace: null,
   fontSize: 14
@@ -163,6 +165,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
+  mcp.setOnChange(() => mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.send('mcp:changed', mcp.describe()));
+  mcp.connectAll(loadSettings().mcpServers).catch(() => {});
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -883,3 +887,81 @@ async function listSkillFiles(base, rel = '', out = [], depth = 0) {
 // ---------- web research ----------
 ipcMain.handle('web:search', (_e, query) => web.webSearch(loadSettings(), String(query || '').slice(0, 400)));
 ipcMain.handle('web:fetch', (_e, url) => web.fetchPage(loadSettings(), url));
+
+// ---------- MCP ----------
+ipcMain.handle('mcp:list', () => mcp.describe());
+ipcMain.handle('mcp:reconnect', () => mcp.connectAll(loadSettings().mcpServers));
+ipcMain.handle('mcp:connectOne', (_e, cfg) => mcp.connectOne(cfg));
+ipcMain.handle('mcp:disconnect', (_e, id) => mcp.disconnectOne(id));
+ipcMain.handle('mcp:call', async (_e, name, args, timeout) => {
+  try {
+    return await mcp.callTool(name, args, { timeout });
+  } catch (err) {
+    return { text: `Error: ${err.message}`, isError: true };
+  }
+});
+
+// ---------- project templates ----------
+// Bundled starter trees under templates/. Install copies a template's files into the open
+// project, skipping files that already exist so nothing is overwritten.
+function templatesDir() {
+  return path.join(__dirname, '..', 'templates');
+}
+
+ipcMain.handle('templates:list', async () => {
+  let dirs = [];
+  try {
+    dirs = (await fsp.readdir(templatesDir(), { withFileTypes: true })).filter((d) => d.isDirectory());
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const d of dirs) {
+    let meta = {};
+    try {
+      meta = JSON.parse(await fsp.readFile(path.join(templatesDir(), d.name, 'template.json'), 'utf8'));
+    } catch {
+      /* no manifest */
+    }
+    out.push({ id: d.name, name: meta.name || d.name, description: meta.description || '', icon: meta.icon || 'sparkles', adds: meta.adds || '', then: meta.then || '' });
+  }
+  return out;
+});
+
+async function collectFiles(root, rel = '', out = []) {
+  const entries = await fsp.readdir(path.join(root, rel), { withFileTypes: true });
+  for (const e of entries) {
+    const p = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) await collectFiles(root, p, out);
+    else if (e.isFile() && p !== 'template.json') out.push(p);
+  }
+  return out;
+}
+
+ipcMain.handle('templates:install', async (_e, id) => {
+  if (!workspaceRoot) throw new Error('Open a project folder first.');
+  if (!/^[\w.-]+$/.test(String(id))) throw new Error('Unknown template');
+  const src = path.join(templatesDir(), id);
+  try {
+    await fsp.access(src);
+  } catch {
+    throw new Error('Unknown template');
+  }
+  const files = await collectFiles(src);
+  const written = [];
+  const skipped = [];
+  for (const rel of files) {
+    const dest = resolveInWorkspace(rel);
+    try {
+      await fsp.access(dest);
+      skipped.push(rel);
+      continue;
+    } catch {
+      /* does not exist, write it */
+    }
+    await fsp.mkdir(path.dirname(dest), { recursive: true });
+    await fsp.copyFile(path.join(src, rel), dest);
+    written.push(rel);
+  }
+  return { written, skipped };
+});

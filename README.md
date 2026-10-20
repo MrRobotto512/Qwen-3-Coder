@@ -64,6 +64,14 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - Always available: `list_files`, `read_file`, `search_code`, `edit_file`, `write_file`, `run_command`, `todo_write`, `ask_user`, plus `web_search` and `fetch_url` unless research is turned off.
   - On demand: `load_skill` (when the project has skills), and `delete_file` / `move_file`, which Qwen loads with `tool_search` when needed.
   - Independent lookups in one reply run in parallel; edits and commands run one at a time.
+- **MCP servers (external tools):**
+  - Add servers in **Settings → Tools & MCP servers** (a command like `npx -y rea-agents mcp`, or an `https://` URL).
+  - Their tools join Qwen's toolset as `mcp__<server>__<tool>`. Like the other extra tools, Qwen loads them with `tool_search` only when a task needs them, so a big server doesn't crowd the tool list.
+  - Each MCP call needs your approval (with an "Always allow" option per server). The status bar shows how many servers and tools are connected.
+  - Works with any MCP server, e.g. [REA](https://github.com/morluto/rea) for reverse engineering. Node-based servers need Node.js installed.
+- **Workflows:**
+  - Bundled starter setups you install into a project from the home screen.
+  - **Software factory:** adapted from the [multi-agent original](https://github.com/zazencodes/zazencodes-season-3/tree/main/src/software-factory-claude-code) for a single local model. Say "run the factory: <feature>" and Qwen runs it through spec → build → review (code + security) → decide, on its own git branch, writing a record of each stage under `factory/jobs/`. Nothing is merged or pushed without you asking.
 - **Project memory and skills:**
   - Put standing instructions for Qwen in `QWEN.md` (or `AGENTS.md`) at the project root.
   - Put task-specific instructions in `.qwen/skills/<name>/SKILL.md`. Personal skills that apply to every project go in `%APPDATA%\qwen-workspace\skills\`.
