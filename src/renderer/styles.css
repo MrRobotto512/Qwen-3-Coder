@@ -494,3 +494,27 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .m-mode button { padding: 4px 14px; font-size: 12.5px; }
 .tagb.yarn { background: rgba(88, 166, 255, .15); color: #79c0ff; }
 .m-facts .ctx-detail { color: var(--text-3); }
+
+/* ---------- plan & compaction ---------- */
+#todo-bar { margin: 0 12px 4px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--bg-1); font-size: 12px; }
+.todo-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; }
+.todo-head .i { width: 13px; height: 13px; }
+.todo-title { font-weight: 600; flex: none; }
+.todo-current { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.todo-head .chev { color: var(--text-3); transition: transform .12s; }
+#todo-bar.open .todo-head .chev { transform: rotate(180deg); }
+.todo-list { display: none; list-style: none; margin: 0; padding: 2px 10px 8px; }
+#todo-bar.open .todo-list { display: block; }
+.todo-list li { display: flex; align-items: center; gap: 7px; padding: 2px 0; color: var(--text-2); }
+.todo-list li .i { width: 12px; height: 12px; }
+.todo-list li.completed { color: var(--text-3); text-decoration: line-through; }
+.todo-list li.completed .ico { color: var(--green); }
+.todo-list li.in_progress { color: var(--text); }
+.todo-list li.in_progress .ico { color: var(--accent-2); }
+.todo-list li.pending .i { width: 8px; height: 8px; opacity: .5; }
+.msg.notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--text-3); border-top: 1px dashed var(--border-2); border-bottom: 1px dashed var(--border-2); padding: 6px 2px; }
+.msg.notice details { width: 100%; }
+.msg.notice summary { cursor: pointer; color: var(--text-2); }
+.notice-detail { white-space: pre-wrap; margin-top: 6px; color: var(--text-2); }
+#ctx-meter { cursor: pointer; }
+.msg.notice > span:not(.ico) { flex: 1; min-width: 0; }

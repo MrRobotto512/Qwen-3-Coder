@@ -976,6 +976,30 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'todo_write',
+      description: 'Keep a short checklist for tasks with 3 or more steps, instead of listing the steps in your reply. Send the whole list every time. Mark one item in_progress while you work on it and mark items completed as soon as they are done. Skip it for simple one-step requests.',
+      parameters: {
+        type: 'object',
+        properties: {
+          todos: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                content: { type: 'string', description: 'What needs to be done, in a few words.' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] }
+              },
+              required: ['content', 'status']
+            }
+          }
+        },
+        required: ['todos']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'run_command',
       description: 'Run a shell command in the project root and return its output (non-interactive, 2 minute timeout). Use it to build, test, install packages or run scripts, instead of for reading or searching files.',
       parameters: { type: 'object', properties: { command: { type: 'string', description: 'The command line to run.' } }, required: ['command'] }
@@ -1003,7 +1027,8 @@ const TOOL_INFO = {
   search_code: { icon: 'search', verb: 'Search', doing: 'Searching for' },
   write_file: { icon: 'filePlus', verb: 'Write', doing: 'Writing' },
   edit_file: { icon: 'pencil', verb: 'Edit', doing: 'Editing' },
-  run_command: { icon: 'terminal', verb: 'Run', doing: 'Running' }
+  run_command: { icon: 'terminal', verb: 'Run', doing: 'Running' },
+  todo_write: { icon: 'list', verb: 'Plan', doing: 'Updating the plan' }
 };
 
 // Context is assembled in layers, from least to most likely to change, so Ollama can reuse its
@@ -1045,6 +1070,7 @@ function systemPrompt(c) {
   if (agent) {
     parts.push(
       '- Explore before changing things: use search_code and read_file instead of guessing file contents.',
+      '- For tasks with 3 or more steps, keep a plan with todo_write and update it as you finish each step.',
       '- When you need several independent lookups (reads, searches, listings), request them all in the same reply; they run in parallel. Edits and commands run one at a time, in the order you give them.',
       '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
       '- Paths are relative to the project root and use forward slashes.',
@@ -1068,8 +1094,13 @@ function systemPrompt(c) {
 }
 
 // Editor and task state for this turn only.
+function todoLines(todos) {
+  return todos.map((t) => `${t.status === 'completed' ? '[x]' : t.status === 'in_progress' ? '[~]' : '[ ]'} ${t.content}`).join('\n');
+}
+
 function turnReminder(c) {
   const lines = [];
+  if (c.todos?.length) lines.push(`Plan (update it with todo_write as you go):\n${todoLines(c.todos)}`);
   if (state.active && c === state.conv) {
     const sel = editor.getSelection();
     lines.push(`Open in the editor: ${state.active}${sel && !sel.isEmpty() ? ` (lines ${sel.startLineNumber}-${sel.endLineNumber} selected)` : ''}`);
@@ -1112,6 +1143,11 @@ function describeCall(name, args) {
     }
     case 'run_command':
       return { target: args.command || '', mono: true, title: args.command };
+    case 'todo_write': {
+      const todos = Array.isArray(args.todos) ? args.todos : [];
+      const current = todos.find((t) => t.status === 'in_progress');
+      return { target: current ? current.content : `${todos.filter((t) => t.status === 'completed').length}/${todos.length} done` };
+    }
     default:
       return { target: '' };
   }
@@ -1218,6 +1254,18 @@ async function executeTool(c, call, row) {
         if (count > 1) return { result: `Error: old_text matches ${count} places in ${p}. Include more surrounding lines so it is unique.` };
         const modified = original.replace(oldText, () => newText);
         return applyAgentEdit(c, row, p, original, modified, `Edit ${p}`);
+      }
+      case 'todo_write': {
+        const todos = (Array.isArray(args.todos) ? args.todos : [])
+          .slice(0, 20)
+          .map((t) => ({ content: String(t.content || '').slice(0, 200), status: ['pending', 'in_progress', 'completed'].includes(t.status) ? t.status : 'pending' }))
+          .filter((t) => t.content);
+        c.todos = todos;
+        if (c === state.conv) renderTodoBar();
+        const done = todos.filter((t) => t.status === 'completed').length;
+        row.setBody(todoLines(todos));
+        const current = todos.find((t) => t.status === 'in_progress');
+        return { result: `Plan updated: ${done}/${todos.length} done.${current ? ` In progress: ${current.content}.` : ''}`, meta: `${done}/${todos.length}` };
       }
       case 'run_command': {
         const cmd = String(args.command || '').trim();
@@ -1397,6 +1445,9 @@ function createConv() {
     changes: new Map(), // path -> { original: string|null, added, removed }
     notes: [], // things to tell Qwen with the next message (e.g. reverts)
     usage: null,
+    usageAt: 0, // history length when `usage` was measured
+    todos: [],
+    compactions: 0,
     busy: false,
     stopRequested: false,
     chatId: null,
@@ -1425,7 +1476,10 @@ function serializeConv(c) {
     display: c.display,
     changes: [...c.changes],
     notes: c.notes,
-    usage: c.usage
+    usage: c.usage,
+    usageAt: c.usageAt,
+    todos: c.todos,
+    compactions: c.compactions
   };
 }
 
@@ -1513,6 +1567,7 @@ function switchConv(c) {
   $('#chat-title').title = c.title;
   renderRunControls();
   updateCtxMeter();
+  renderTodoBar();
   renderChanges();
   renderTree();
   renderCenter();
@@ -1550,6 +1605,7 @@ function renderTranscript(c) {
   for (const item of c.display) {
     if (item.t === 'user') renderUserMessage(c, item.text, item.attached || []);
     else if (item.t === 'error') renderError(c, item.text);
+    else if (item.t === 'notice') renderNotice(c, item);
     else if (item.t === 'assistant') {
       const view = addAssistantMessage(c, item);
       view.setFinal(item.content || '', item.reasoning || '');
@@ -1747,6 +1803,8 @@ async function runConversation(c) {
   const useTools = state.settings.agentMode && !!state.ws;
   for (let step = 0; step < MAX_AGENT_STEPS; step++) {
     if (c.stopRequested) return false;
+    if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
+    if (c.stopRequested) return false;
     const view = addAssistantMessage(c);
     const id = `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
     c.chatId = id;
@@ -1768,6 +1826,7 @@ async function runConversation(c) {
     if (res.ok && !res.aborted) view.setFinal(res.content || '', res.reasoning || '');
     if (res.usage?.promptTokens && res.usage.contextLength) {
       c.usage = res.usage;
+      c.usageAt = c.history.length;
       if (c === state.conv) updateCtxMeter();
       const entry = catalogEntryFor(state.settings.model);
       const trained = state.modelInfo?.contextLength || entry?.nativeCtx;
@@ -1780,8 +1839,8 @@ async function runConversation(c) {
             actions: [{ label: 'Later' }, { label: 'Show long-context builds', primary: true, onClick: () => openModels('long') }]
           }));
       }
-      if (res.usage.promptTokens >= res.usage.contextLength * 0.95) {
-        addError(c, `The conversation (${res.usage.promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${res.usage.contextLength.toLocaleString()}), so the oldest messages — including your instructions — were cut off. Raise "Context window" in Settings or start a new chat.`);
+      if (res.usage.promptTokens >= res.usage.contextLength * 0.98) {
+        addError(c, `The conversation (${res.usage.promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${res.usage.contextLength.toLocaleString()}) even after summarizing, so Ollama cut off the oldest messages. Raise "Context window" in Settings, or start a new chat.`);
       }
     }
 
@@ -1824,6 +1883,7 @@ async function runConversation(c) {
         rows[i].done(outs[i]);
         c.history.push({ role: 'tool', tool_call_id: call.id, content: outs[i].result });
       });
+      if (c === state.conv) updateCtxMeter();
       saveConv(c);
     }
     if (step === MAX_AGENT_STEPS - 1) addError(c, `Stopped after ${MAX_AGENT_STEPS} steps. Send a message to let Qwen continue.`);
@@ -1867,18 +1927,150 @@ function renderRunControls() {
 
 function updateCtxMeter() {
   const m = $('#ctx-meter');
-  const u = state.conv?.usage;
-  if (!u) {
+  const c = state.conv;
+  if (!c?.history.length) {
     m.classList.add('hidden');
     return;
   }
-  const pct = Math.min(100, Math.round((u.promptTokens / u.contextLength) * 100));
+  const { tokens, window: size, measured } = contextUse(c);
+  const pct = Math.min(100, Math.round((tokens / size) * 100));
   m.classList.remove('hidden');
   m.classList.toggle('warn', pct >= 70 && pct < 95);
   m.classList.toggle('full', pct >= 95);
   m.querySelector('i').style.width = `${pct}%`;
-  m.querySelector('.txt').textContent = `${pct}%`;
-  m.title = `Context used: ${u.promptTokens.toLocaleString()} of ${u.contextLength.toLocaleString()} tokens. Start a new chat when it gets full.`;
+  m.querySelector('.txt').textContent = `${measured ? '' : '~'}${pct}%`;
+  m.title = `Context used: ${measured ? '' : 'about '}${tokens.toLocaleString()} of ${size.toLocaleString()} tokens. Older messages are summarized automatically at ${Math.round(COMPACT_AT * 100)}%. Click to summarize now.`;
+}
+
+// ---------- compaction ----------
+// When the conversation nears the context window, older turns are replaced by a summary the
+// model writes, keeping the system prompt and the most recent turns verbatim.
+const COMPACT_AT = 0.85;
+const KEEP_TAIL = 0.35; // share of the window kept as recent, unsummarized turns
+
+function estimateTokens(messages) {
+  let chars = 0;
+  for (const m of messages) chars += (m.content || '').length + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0) + 12;
+  return Math.ceil(chars / 3.5);
+}
+
+// Measured prompt size from the last request plus an estimate for messages added since.
+function contextUse(c) {
+  const size = Number(c.usage?.contextLength) || Number(state.settings.contextLength) || 32768;
+  if (c.usage?.promptTokens && c.usageAt <= c.history.length) {
+    return { tokens: c.usage.promptTokens + estimateTokens(c.history.slice(c.usageAt)), window: size, measured: c.usageAt === c.history.length };
+  }
+  return { tokens: estimateTokens([{ content: systemPrompt(c) }, ...c.history]), window: size, measured: false };
+}
+
+function transcriptForSummary(messages, maxChars) {
+  const lines = messages.map((m) => {
+    if (m.role === 'tool') return `[tool result]\n${(m.content || '').slice(0, 1500)}`;
+    const calls = (m.tool_calls || []).map((t) => `[calls ${t.function.name}(${(t.function.arguments || '').slice(0, 300)})]`).join('\n');
+    return `[${m.role}]\n${(m.content || '').slice(0, 6000)}${calls ? `\n${calls}` : ''}`;
+  });
+  let text = lines.join('\n\n');
+  // Keep the opening request and the most recent part if the transcript is too long to summarize.
+  if (text.length > maxChars) text = `${lines[0].slice(0, 4000)}\n\n[... middle of the conversation omitted ...]\n\n${text.slice(-(maxChars - 4500))}`;
+  return text;
+}
+
+const COMPACT_PROMPT = `<instructions>
+Summarize the transcript above so the same agent can continue the work without it. Be specific: keep file paths, function names, commands, error messages and decisions. Do not invent anything.
+Use these sections:
+<goal>What the user asked for, including constraints and preferences.</goal>
+<progress>What has been done: what was learned from files, which files changed and how, commands run and their results.</progress>
+<state>Where the work stands and the immediate next step.</state>
+<open_questions>Anything unresolved or waiting on the user.</open_questions>
+Keep it under 400 words. Reply with the summary only.
+</instructions>`;
+
+async function compactConversation(c, { manual } = {}) {
+  const size = contextUse(c).window;
+  const h = c.history;
+  // Cut where the kept tail starts with a user or assistant message, never between a tool call
+  // and its result, keeping as many recent tokens as the tail budget allows.
+  let cut = -1;
+  for (let i = h.length - 1; i >= 2; i--) {
+    if (h[i].role === 'tool') continue;
+    if (estimateTokens(h.slice(i)) > size * KEEP_TAIL) break;
+    cut = i;
+  }
+  if (cut < 0) cut = h.map((m) => m.role).lastIndexOf('assistant');
+  if (cut < 2) {
+    if (manual) flash('Nothing to summarize yet');
+    return false;
+  }
+  const head = h.slice(0, cut);
+  const before = contextUse(c).tokens;
+  setActivity(c, 'Summarizing earlier messages');
+  const res = await api.chatStream(`k${Date.now()}`, {
+    messages: [
+      { role: 'system', content: 'You compress coding-agent transcripts into a working summary for the same agent to continue from.' },
+      { role: 'user', content: `<transcript>\n${transcriptForSummary(head, Math.floor(size * 0.6 * 3.5))}\n</transcript>\n\n${COMPACT_PROMPT}` }
+    ]
+  });
+  const summary = res.ok ? stripThink(res.content || '').trim() : '';
+  if (!summary) {
+    addError(c, `Couldn't summarize the conversation to free up context${res.error ? `: ${res.error}` : '.'}`);
+    return false;
+  }
+  const block = `<conversation-summary>\nEarlier parts of this conversation were summarized to save context.\n${summary}\n</conversation-summary>`;
+  let tail = h.slice(cut);
+  // A big recent tool result (a long file, say) can blow the tail budget on its own; shorten
+  // those instead of keeping them whole, since the model can fetch them again.
+  const budgetChars = size * KEEP_TAIL * 3.5;
+  const toolCount = tail.filter((m) => m.role === 'tool').length;
+  if (toolCount && estimateTokens(tail) > size * KEEP_TAIL) {
+    const limit = Math.max(800, Math.floor(budgetChars / (toolCount + 1)));
+    tail = tail.map((m) =>
+      m.role === 'tool' && m.content.length > limit
+        ? { ...m, content: `${m.content.slice(0, limit)}\n... [shortened to save context; call the tool again (for files, read_file with start_line) to see the rest]` }
+        : m
+    );
+  }
+  c.history = tail[0].role === 'user' ? [{ ...tail[0], content: `${block}\n\n${tail[0].content}` }, ...tail.slice(1)] : [{ role: 'user', content: block }, ...tail];
+  c.usage = null;
+  c.usageAt = 0;
+  c.compactions = (c.compactions || 0) + 1;
+  const item = { t: 'notice', text: `Summarized ${head.length} earlier messages to free up context (about ${before.toLocaleString()} → ${contextUse(c).tokens.toLocaleString()} tokens).`, detail: summary };
+  c.display.push(item);
+  renderNotice(c, item);
+  if (c === state.conv) updateCtxMeter();
+  saveConv(c);
+  return true;
+}
+
+async function compactNow() {
+  const c = state.conv;
+  if (!c || c.busy) return;
+  setBusy(c, true);
+  try {
+    await compactConversation(c, { manual: true });
+  } finally {
+    setBusy(c, false);
+    c.status = 'done';
+    saveConv(c, true);
+  }
+}
+
+function renderTodoBar() {
+  const bar = $('#todo-bar');
+  const todos = state.conv?.todos || [];
+  if (!todos.length) {
+    bar.classList.add('hidden');
+    return;
+  }
+  const done = todos.filter((t) => t.status === 'completed').length;
+  const current = todos.find((t) => t.status === 'in_progress');
+  bar.classList.remove('hidden');
+  bar.replaceChildren(
+    el('div', { class: 'todo-head', onclick: () => bar.classList.toggle('open') },
+      iconEl('list'), el('span', { class: 'todo-title', text: `Plan · ${done}/${todos.length}` }),
+      el('span', { class: 'todo-current', text: current ? current.content : done === todos.length ? 'All done' : '' }),
+      iconEl('chevronDown', 'chev')),
+    el('ul', { class: 'todo-list' }, ...todos.map((t) => el('li', { class: t.status }, iconEl(t.status === 'completed' ? 'check' : t.status === 'in_progress' ? 'play' : 'stop'), el('span', { text: t.content }))))
+  );
 }
 
 function stripThink(s) {
@@ -1999,6 +2191,13 @@ function addError(c, text, usedTools) {
   }
   c.display.push({ t: 'error', text: text + hint });
   renderError(c, text + hint);
+}
+
+function renderNotice(c, item) {
+  const node = el('div', { class: 'msg notice' }, iconEl('history'), el('span', { text: item.text }));
+  if (item.detail) node.append(el('details', {}, el('summary', { text: 'Show summary' }), el('div', { class: 'notice-detail', text: item.detail })));
+  c.container.append(node);
+  scrollChat(c, true);
 }
 
 function renderError(c, text) {
@@ -3179,6 +3378,7 @@ function bindUi() {
   $('#btn-send').onclick = send;
   $('#btn-stop').onclick = () => stopChat(state.conv);
   $('#btn-history').onclick = () => showView('history');
+  $('#ctx-meter').onclick = compactNow;
   $('#chat-running').onclick = () => showView('history');
   $('#btn-new-task').onclick = newChat;
   $('#history-search').oninput = renderHistory;
