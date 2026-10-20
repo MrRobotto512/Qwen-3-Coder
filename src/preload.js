@@ -47,6 +47,9 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('ollama:pull-progress', fn);
   },
 
+  webSearch: (query) => ipcRenderer.invoke('web:search', query),
+  webFetch: (url) => ipcRenderer.invoke('web:fetch', url),
+
   skillsList: () => ipcRenderer.invoke('skills:list'),
   skillsRead: (id, file) => ipcRenderer.invoke('skills:read', id, file),
 

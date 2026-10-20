@@ -8,6 +8,13 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
 
 ## Features
 
+- **Build from scratch:**
+  - Ask for something new ("help me make a Switch homebrew app"), or use **Start from scratch** on the home screen.
+  - Qwen asks what only you can answer with `ask_user`. Click a suggested answer or type your own, in the question card or the message box.
+  - It researches the toolchain with `web_search` and `fetch_url`, preferring official docs and repositories.
+  - It saves what it learns (toolchain, build commands, links) to `QWEN.md`, so later conversations start with it.
+  - Search uses DuckDuckGo without a key, or Brave Search / SearXNG (**Settings → Research**).
+  - Pages on this PC or your local network can't be fetched unless you allow it, because web content can try to steer the AI.
 - **Conversations & task history:**
   - Every conversation or agent task is saved per project.
   - The **History** panel lists them by Today / Yesterday / Earlier, with status (running, needs approval, done, failed, stopped) and how many files each changed. Search, rename or delete them.
@@ -54,7 +61,7 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - Code blocks get **Copy**, **Insert** and **Apply** buttons.
   - A context meter shows how full Qwen's memory is.
 - **Agent tools:**
-  - Always available: `list_files`, `read_file`, `search_code`, `edit_file`, `write_file`, `run_command`, `todo_write`.
+  - Always available: `list_files`, `read_file`, `search_code`, `edit_file`, `write_file`, `run_command`, `todo_write`, `ask_user`, plus `web_search` and `fetch_url` unless research is turned off.
   - On demand: `load_skill` (when the project has skills), and `delete_file` / `move_file`, which Qwen loads with `tool_search` when needed.
   - Independent lookups in one reply run in parallel; edits and commands run one at a time.
 - **Project memory and skills:**

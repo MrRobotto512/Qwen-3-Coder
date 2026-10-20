@@ -211,6 +211,19 @@
         <span class="hint">Commands starting with these run without asking in Auto-edit mode. Separate with commas.</span>
       </label>
 
+      <div class="section-title">Research</div>
+      <label class="check"><input type="checkbox" id="s-webResearch" /> Let Qwen search the web and read pages (web_search, fetch_url)</label>
+      <label>Search with
+        <select id="s-searchProvider">
+          <option value="duckduckgo">DuckDuckGo (no key needed)</option>
+          <option value="brave">Brave Search API (free tier, needs a key)</option>
+          <option value="searxng">SearXNG (your own instance)</option>
+        </select>
+      </label>
+      <label id="s-brave-row">Brave Search API key <input id="s-searchApiKey" type="password" spellcheck="false" placeholder="From api-dashboard.search.brave.com" /></label>
+      <label id="s-searxng-row">SearXNG address <input id="s-searxngUrl" spellcheck="false" placeholder="http://localhost:8080 (JSON output must be enabled)" /></label>
+      <label class="check"><input type="checkbox" id="s-allowPrivateFetch" /> Allow reading pages on this PC or the local network (off by default, because web content can try to steer Qwen)</label>
+
       <div class="section-title">Editor</div>
       <div class="row two">
         <label>Font size <input id="s-fontSize" type="number" min="9" max="32" /></label>

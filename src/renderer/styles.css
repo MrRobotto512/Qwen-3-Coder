@@ -519,3 +519,12 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 #ctx-meter { cursor: pointer; }
 .msg.notice > span:not(.ico) { flex: 1; min-width: 0; }
 .ch-item .st.D { color: var(--red); }
+
+/* ---------- questions from Qwen ---------- */
+.ask-card { border-color: rgba(139, 108, 255, .45); background: var(--accent-bg); }
+.ask-card .q { font-weight: 500; }
+.ask-options { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip-btn { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: var(--bg-2); border-color: var(--border-2); color: var(--text-2); }
+.chip-btn:hover { border-color: var(--accent); color: var(--text); }
+.chip-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ask-input { width: 100%; font-size: 12.5px; padding: 5px 8px; }

@@ -5,6 +5,7 @@ const fsp = require('fs/promises');
 const { spawn } = require('child_process');
 const updater = require('./updater');
 const { detectSpecs } = require('./hardware');
+const web = require('./web');
 
 const IGNORED_DIRS = new Set([
   'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'out', '.next', '.nuxt',
@@ -30,6 +31,11 @@ const DEFAULT_SETTINGS = {
   contextLength: 32768,
   recentWorkspaces: [],
   autoCheckUpdates: true,
+  webResearch: true, // lets the agent use web_search and fetch_url
+  searchProvider: 'duckduckgo', // duckduckgo | brave | searxng
+  searchApiKey: '',
+  searxngUrl: '',
+  allowPrivateFetch: false,
   lastConversations: {}, // workspace root -> id of the conversation open when the app closed
   lastWorkspace: null,
   fontSize: 14
@@ -873,3 +879,7 @@ async function listSkillFiles(base, rel = '', out = [], depth = 0) {
   }
   return out;
 }
+
+// ---------- web research ----------
+ipcMain.handle('web:search', (_e, query) => web.webSearch(loadSettings(), String(query || '').slice(0, 400)));
+ipcMain.handle('web:fetch', (_e, url) => web.fetchPage(loadSettings(), url));
