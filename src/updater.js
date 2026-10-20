@@ -76,6 +76,8 @@ async function downloadUpdate(onProgress) {
   }
   if (!updater) {
     updater = require('electron-updater').autoUpdater;
+    // Point at the releases directly so the updater doesn't depend on a generated app-update.yml.
+    updater.setFeedURL({ provider: 'github', owner: REPO.owner, repo: REPO.repo });
     updater.autoDownload = false;
     updater.autoInstallOnAppQuit = true;
     updater.logger = null;
