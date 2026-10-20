@@ -518,3 +518,4 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .notice-detail { white-space: pre-wrap; margin-top: 6px; color: var(--text-2); }
 #ctx-meter { cursor: pointer; }
 .msg.notice > span:not(.ico) { flex: 1; min-width: 0; }
+.ch-item .st.D { color: var(--red); }

@@ -426,10 +426,10 @@ function escapeRegex(s) {
 function recordChange(c, path, before, after) {
   const prev = c.changes.get(path);
   const original = prev ? prev.original : before;
-  if (original !== null && original === after) {
+  if ((original !== null && original === after) || (original === null && after === null)) {
     c.changes.delete(path);
   } else {
-    c.changes.set(path, { original, ...diffStats(original ?? '', after) });
+    c.changes.set(path, { original, deleted: after === null, ...diffStats(original ?? '', after ?? '') });
   }
   if (c === state.conv) renderChanges();
   saveConv(c);
@@ -451,11 +451,11 @@ function renderChanges() {
 }
 
 function changeItem(path, ch) {
-  const st = ch.original === null ? 'A' : 'M';
+  const st = ch.deleted ? 'D' : ch.original === null ? 'A' : 'M';
   return el(
     'div',
     { class: 'ch-item', title: path, onclick: () => openChangeReview(path) },
-    el('span', { class: `st ${st}`, text: st, title: st === 'A' ? 'Added' : 'Modified' }),
+    el('span', { class: `st ${st}`, text: st, title: { A: 'Added', M: 'Modified', D: 'Deleted' }[st] }),
     fileBadge(baseName(path)),
     el('span', { class: 'name', text: baseName(path) }),
     el('span', { class: 'dir', text: parentDir(path) === '.' ? '' : parentDir(path) }),
@@ -479,14 +479,14 @@ async function openChangeReview(path) {
   } catch {
     /* deleted since */
   }
-  openReview({ path, original: ch.original ?? '', modified: current, pending: false, title: `${ch.original === null ? 'Created' : 'Changed'} ${path}` });
+  openReview({ path, original: ch.original ?? '', modified: current, pending: false, title: `${ch.deleted ? 'Deleted' : ch.original === null ? 'Created' : 'Changed'} ${path}` });
 }
 
 async function revertChange(path, ask = true) {
   const c = state.conv;
   const ch = c?.changes.get(path);
   if (!ch) return;
-  const what = ch.original === null ? `delete ${path} (Qwen created it)` : `restore ${path} to how it was before Qwen changed it`;
+  const what = ch.original === null ? `delete ${path} (Qwen created it)` : ch.deleted ? `restore ${path}, which Qwen deleted` : `restore ${path} to how it was before Qwen changed it`;
   if (ask && !confirm(`Revert: ${what}?`)) return;
   try {
     if (ch.original === null) {
@@ -497,6 +497,10 @@ async function revertChange(path, ask = true) {
       await api.write(path, ch.original);
       syncOpenTab(path, ch.original);
       clearHighlights(path);
+      if (ch.deleted) {
+        expandTo(path);
+        state.fileIndex = null;
+      }
     }
   } catch (e) {
     alert(`Could not revert ${path}: ${e.message}`);
@@ -896,7 +900,9 @@ function langOf(p) {
 // ===================================================================
 // Chat: tools (agent mode)
 // ===================================================================
-const TOOLS = [
+// Core tools go out with every request. Deferred tools are only named in the system prompt
+// until tool_search loads their schemas, which keeps the tool list small for local models.
+const CORE_TOOLS = [
   {
     type: 'function',
     function: {
@@ -1007,9 +1013,70 @@ const TOOLS = [
   }
 ];
 
+const DEFERRED_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'delete_file',
+      description: 'Delete a text file from the project. The user can restore it from the Changes panel.',
+      parameters: { type: 'object', properties: { path: { type: 'string', description: 'File path relative to the project root.' } }, required: ['path'] }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'move_file',
+      description: 'Move or rename a text file inside the project, instead of writing a copy and deleting the original.',
+      parameters: {
+        type: 'object',
+        properties: { from: { type: 'string', description: 'Current path.' }, to: { type: 'string', description: 'New path; must not exist yet.' } },
+        required: ['from', 'to']
+      }
+    }
+  }
+];
+
+const LOAD_SKILL_TOOL = {
+  type: 'function',
+  function: {
+    name: 'load_skill',
+    description: 'Load the full instructions of a skill listed in <skills>, or one of its supporting files. Do this before starting a task the skill covers.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Skill name as listed.' },
+        file: { type: 'string', description: 'Optional supporting file inside the skill, as listed after loading it.' }
+      },
+      required: ['name']
+    }
+  }
+};
+
+const TOOL_SEARCH_TOOL = {
+  type: 'function',
+  function: {
+    name: 'tool_search',
+    description: 'Load tools listed in <deferred_tools> so you can call them. Search by name or purpose.',
+    parameters: { type: 'object', properties: { query: { type: 'string', description: 'What you need to do, or a tool name.' } }, required: ['query'] }
+  }
+};
+
+const ALL_TOOLS = [...CORE_TOOLS, ...DEFERRED_TOOLS, LOAD_SKILL_TOOL, TOOL_SEARCH_TOOL];
+
+// The tool list for one request. It only changes when skills appear or tool_search loads a
+// deferred tool, because Qwen's template puts the tools inside the cached system prompt.
+function toolsFor(c) {
+  const active = new Set(c.activeTools || []);
+  const tools = [...CORE_TOOLS, ...DEFERRED_TOOLS.filter((t) => active.has(t.function.name))];
+  if (c.skills?.length) tools.push(LOAD_SKILL_TOOL);
+  if (DEFERRED_TOOLS.some((t) => !active.has(t.function.name))) tools.push(TOOL_SEARCH_TOOL);
+  return tools;
+}
+
 // Tools that only read can run together; anything that changes files or runs commands is a
 // barrier that runs alone, in the order Qwen asked.
-const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'search_code']);
+const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'search_code', 'load_skill', 'tool_search']);
+const READ_PAGE = 400;
 
 function toolBatches(calls) {
   const batches = [];
@@ -1028,7 +1095,11 @@ const TOOL_INFO = {
   write_file: { icon: 'filePlus', verb: 'Write', doing: 'Writing' },
   edit_file: { icon: 'pencil', verb: 'Edit', doing: 'Editing' },
   run_command: { icon: 'terminal', verb: 'Run', doing: 'Running' },
-  todo_write: { icon: 'list', verb: 'Plan', doing: 'Updating the plan' }
+  todo_write: { icon: 'list', verb: 'Plan', doing: 'Updating the plan' },
+  delete_file: { icon: 'trash', verb: 'Delete', doing: 'Deleting' },
+  move_file: { icon: 'external', verb: 'Move', doing: 'Moving' },
+  load_skill: { icon: 'book', verb: 'Skill', doing: 'Loading skill' },
+  tool_search: { icon: 'search', verb: 'Find tools', doing: 'Looking up tools for' }
 };
 
 // Context is assembled in layers, from least to most likely to change, so Ollama can reuse its
@@ -1052,7 +1123,7 @@ async function loadProjectMemory() {
 
 function systemPrompt(c) {
   const agent = state.settings.agentMode && !!state.ws;
-  const key = `${agent}|${c.workspace}|${c.memory?.text || ''}`;
+  const key = `${agent}|${c.workspace}|${c.memory?.text || ''}|${(c.skills || []).map((sk) => `${sk.name}:${sk.description}`).join(',')}`;
   if (c.sysPrompt?.key === key) return c.sysPrompt.text;
   const win = state.ws?.platform === 'win32';
   const parts = [
@@ -1063,6 +1134,10 @@ function systemPrompt(c) {
     `Operating system: ${win ? 'Windows (commands run in cmd.exe; use Windows syntax such as "dir", "type", "&&")' : state.ws?.platform || 'unknown'}`,
     `Conversation started: ${new Date(c.createdAt).toDateString()}`,
     c.memory ? `<project_memory file="${c.memory.name}">\n${c.memory.text}\n</project_memory>` : null,
+    agent && c.skills?.length
+      ? `<skills>\nTask-specific instructions. When a task matches one, call load_skill with its name before starting.\n${c.skills.map((sk) => `- ${sk.name}: ${sk.description}`).join('\n')}\n</skills>`
+      : null,
+    agent ? `<deferred_tools>\nAvailable but not loaded. Call tool_search to load them when you need one.\n${DEFERRED_TOOLS.map((t) => `- ${t.function.name}: ${t.function.description.split('. ')[0]}`).join('\n')}\n</deferred_tools>` : null,
     '</context>',
     '',
     '<instructions>'
@@ -1070,6 +1145,7 @@ function systemPrompt(c) {
   if (agent) {
     parts.push(
       '- Explore before changing things: use search_code and read_file instead of guessing file contents.',
+      '- Long files come back a page at a time; read the next page only when you need it, instead of re-reading the whole file.',
       '- For tasks with 3 or more steps, keep a plan with todo_write and update it as you finish each step.',
       '- When you need several independent lookups (reads, searches, listings), request them all in the same reply; they run in parallel. Edits and commands run one at a time, in the order you give them.',
       '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
@@ -1106,7 +1182,7 @@ function turnReminder(c) {
     lines.push(`Open in the editor: ${state.active}${sel && !sel.isEmpty() ? ` (lines ${sel.startLineNumber}-${sel.endLineNumber} selected)` : ''}`);
   }
   if (c.changes.size) {
-    lines.push(`Files changed in this conversation: ${[...c.changes].map(([p, ch]) => `${p} (${ch.original === null ? 'created' : `+${ch.added} -${ch.removed}`})`).join(', ')}`);
+    lines.push(`Files changed in this conversation: ${[...c.changes].map(([p, ch]) => `${p} (${ch.deleted ? 'deleted' : ch.original === null ? 'created' : `+${ch.added} -${ch.removed}`})`).join(', ')}`);
   }
   return lines.join('\n');
 }
@@ -1143,6 +1219,16 @@ function describeCall(name, args) {
     }
     case 'run_command':
       return { target: args.command || '', mono: true, title: args.command };
+    case 'delete_file': {
+      const p = normPath(args.path);
+      return { target: baseName(p), title: p };
+    }
+    case 'move_file':
+      return { target: `${baseName(normPath(args.from))} → ${normPath(args.to)}`, title: `${args.from} → ${args.to}` };
+    case 'load_skill':
+      return { target: `${args.name || ''}${args.file ? ` · ${args.file}` : ''}` };
+    case 'tool_search':
+      return { target: `“${args.query || ''}”` };
     case 'todo_write': {
       const todos = Array.isArray(args.todos) ? args.todos : [];
       const current = todos.find((t) => t.status === 'in_progress');
@@ -1212,23 +1298,22 @@ async function executeTool(c, call, row) {
         let text = tab ? tab.model.getValue() : await api.read(p);
         const all = text.split(/\r?\n/);
         const lineCount = all.length - (all[all.length - 1] === '' ? 1 : 0);
-        let header = `${p} (${lineCount} lines)`;
-        let start = null;
-        if (args.start_line || args.end_line) {
-          start = Math.max(1, args.start_line || 1);
-          const end = Math.min(all.length, args.end_line || all.length);
-          text = all.slice(start - 1, end).join('\n');
-          header += `, showing lines ${start}-${end}`;
-        }
+        // Long files come back a page at a time with a pointer to the next page.
+        const start = Math.max(1, parseInt(args.start_line, 10) || 1);
+        const end = Math.min(lineCount, parseInt(args.end_line, 10) || start + READ_PAGE - 1, start + READ_PAGE * 2 - 1);
+        const paged = start > 1 || end < lineCount;
+        if (paged) text = all.slice(start - 1, end).join('\n');
+        const header = `${p} (${lineCount} lines)${paged ? `, showing lines ${start}-${end}` : ''}`;
+        const more = end < lineCount ? `\n[${lineCount - end} more lines. Call read_file with start_line=${end + 1} to continue.]` : '';
         row.setBody(text);
-        if (follow) openFile(p, { preview: true, focus: false, line: start });
-        return { result: `${header}:\n${truncate(text)}`, meta: `${lineCount} lines` };
+        if (follow) openFile(p, { preview: true, focus: false, line: start > 1 ? start : null });
+        return { result: `${header}:\n${truncate(text)}${more}`, meta: paged ? `lines ${start}–${end} of ${lineCount}` : `${lineCount} lines` };
       }
       case 'search_code': {
         const hits = await api.search(args.query, { regex: !!args.regex, limit: 80 });
         const out = hits.length ? hits.map((h) => `${h.path}:${h.line}: ${h.text}`).join('\n') : 'No matches.';
         row.setBody(out);
-        return { result: out, meta: `${hits.length}${hits.length >= 80 ? '+' : ''} matches` };
+        return { result: hits.length >= 80 ? `${out}\n[Showing the first 80 matches. Narrow the query to see others.]` : out, meta: `${hits.length}${hits.length >= 80 ? '+' : ''} matches` };
       }
       case 'write_file': {
         const p = normPath(args.path);
@@ -1254,6 +1339,72 @@ async function executeTool(c, call, row) {
         if (count > 1) return { result: `Error: old_text matches ${count} places in ${p}. Include more surrounding lines so it is unique.` };
         const modified = original.replace(oldText, () => newText);
         return applyAgentEdit(c, row, p, original, modified, `Edit ${p}`);
+      }
+      case 'delete_file': {
+        const p = normPath(args.path);
+        if (p === '.') return { result: 'Error: refusing to delete the project root.' };
+        let original;
+        try {
+          original = findTab(p)?.model.getValue() ?? (await api.read(p));
+        } catch (e) {
+          return { result: `Error: ${cleanError(e)}. delete_file only removes single text files.` };
+        }
+        row.setDiffBody(unifiedDiff(original, ''));
+        if (needsApproval('edit')) {
+          const ok = await row.requestApproval({ kind: 'edit', question: `Delete ${p}`, path: p, original, modified: '', stats: diffStats(original, '') });
+          if (!ok) return { result: 'The user rejected this deletion. Do not retry it; ask the user how they would like to proceed.', rejected: true };
+        }
+        await api.remove(p, { quiet: true });
+        if (findTab(p)) closeTab(p, true);
+        recordChange(c, p, original, null);
+        state.fileIndex = null;
+        renderTree();
+        row.linkToChange(p);
+        return { result: `Deleted ${p}. The user can restore it from the Changes panel.`, meta: 'deleted' };
+      }
+      case 'move_file': {
+        const from = normPath(args.from);
+        const to = normPath(args.to);
+        if (from === to || to === '.') return { result: 'Error: give a different destination path.' };
+        let content;
+        try {
+          content = findTab(from)?.model.getValue() ?? (await api.read(from));
+        } catch (e) {
+          return { result: `Error: ${cleanError(e)}. move_file only moves single text files.` };
+        }
+        if (await api.exists(to)) return { result: `Error: ${to} already exists. Pick another name, or delete it first.` };
+        row.setBody(`${from} → ${to}`);
+        if (needsApproval('edit')) {
+          const ok = await row.requestApproval({ kind: 'edit', question: `Move ${from} → ${to}`, path: to, original: '', modified: content, stats: diffStats('', content) });
+          if (!ok) return { result: 'The user rejected this move. Do not retry it; ask the user how they would like to proceed.', rejected: true };
+        }
+        await api.write(to, content);
+        await api.remove(from, { quiet: true });
+        if (findTab(from)) closeTab(from, true);
+        recordChange(c, to, null, content);
+        recordChange(c, from, content, null);
+        expandTo(to);
+        state.fileIndex = null;
+        renderTree();
+        row.linkToChange(to);
+        return { result: `Moved ${from} to ${to}.`, meta: 'moved' };
+      }
+      case 'load_skill': {
+        const skill = (c.skills || []).find((sk) => sk.name.toLowerCase() === String(args.name || '').toLowerCase());
+        if (!skill) return { result: `Error: no skill named "${args.name}". Available skills: ${(c.skills || []).map((sk) => sk.name).join(', ') || 'none'}.` };
+        const r = await api.skillsRead(skill.id, args.file || undefined);
+        row.setBody(r.content);
+        const more = !args.file && r.files.length ? `\n\nSupporting files (load one with load_skill and file): ${r.files.join(', ')}` : '';
+        return { result: `<skill name="${skill.name}"${args.file ? ` file="${args.file}"` : ''}>\n${truncate(r.content)}\n</skill>${more}`, meta: args.file || `${skill.scope} skill` };
+      }
+      case 'tool_search': {
+        const words = String(args.query || '').toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 2);
+        const matches = DEFERRED_TOOLS.filter((t) => !words.length || words.some((w) => `${t.function.name} ${t.function.description}`.toLowerCase().includes(w)));
+        if (!matches.length) return { result: `No matching tools. Deferred tools: ${DEFERRED_TOOLS.map((t) => t.function.name).join(', ')}.`, meta: 'none found' };
+        c.activeTools = [...new Set([...(c.activeTools || []), ...matches.map((t) => t.function.name)])];
+        const out = matches.map((t) => `${t.function.name}: ${t.function.description}\nParameters: ${JSON.stringify(t.function.parameters.properties)}`).join('\n\n');
+        row.setBody(out);
+        return { result: `Loaded ${matches.map((t) => t.function.name).join(', ')}. You can call ${matches.length === 1 ? 'it' : 'them'} from your next reply.\n\n${out}`, meta: `${matches.length} loaded` };
       }
       case 'todo_write': {
         const todos = (Array.isArray(args.todos) ? args.todos : [])
@@ -1285,7 +1436,7 @@ async function executeTool(c, call, row) {
         return { result: `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`, meta: `exit ${r.code}`, failed: r.code !== 0 };
       }
       default:
-        return { result: `Error: unknown tool "${name}". Available tools: ${TOOLS.map((t) => t.function.name).join(', ')}.` };
+        return { result: `Error: unknown tool "${name}". Available tools: ${toolsFor(c).map((t) => t.function.name).join(', ')}.` };
     }
   } catch (e) {
     return { result: `Error: ${e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}` };
@@ -1338,7 +1489,7 @@ function truncate(s) {
 //   (Qwen2.5-Coder in Ollama does this). Only objects naming one of our tools count, so
 //   ordinary JSON in an answer is left alone.
 const TOOL_TEXT_MARKER = /<tool_call>|<function=[\w.-]+>/;
-const JSON_TOOL_CALL = new RegExp(`(?:\`\`\`[\\w-]*[ \\t]*\\r?\\n\\s*)?\\{\\s*"name"\\s*:\\s*"(?:${TOOLS.map((t) => t.function.name).join('|')})"`);
+const JSON_TOOL_CALL = new RegExp(`(?:\`\`\`[\\w-]*[ \\t]*\\r?\\n\\s*)?\\{\\s*"name"\\s*:\\s*"(?:${ALL_TOOLS.map((t) => t.function.name).join('|')})"`);
 const MULTILINE_PARAMS = new Set(['content', 'old_text', 'new_text']);
 
 function textToolCallStart(content) {
@@ -1394,7 +1545,7 @@ function extractTextToolCalls(content) {
       add(fm[1], args);
     }
   } else if (!tail.includes('<tool_call>')) {
-    const known = new Set(TOOLS.map((t) => t.function.name));
+    const known = new Set(ALL_TOOLS.map((t) => t.function.name));
     const re = /\{\s*"name"\s*:/g;
     let m;
     while ((m = re.exec(tail))) {
@@ -1448,6 +1599,7 @@ function createConv() {
     usageAt: 0, // history length when `usage` was measured
     todos: [],
     compactions: 0,
+    activeTools: [], // deferred tools loaded with tool_search
     busy: false,
     stopRequested: false,
     chatId: null,
@@ -1479,7 +1631,8 @@ function serializeConv(c) {
     usage: c.usage,
     usageAt: c.usageAt,
     todos: c.todos,
-    compactions: c.compactions
+    compactions: c.compactions,
+    activeTools: c.activeTools
   };
 }
 
@@ -1765,7 +1918,7 @@ async function send() {
   // Project memory is read once per conversation (and again after the app restarts) so the
   // system prompt stays the same from turn to turn.
   if (!c.memoryLoaded && state.ws) {
-    c.memory = await loadProjectMemory();
+    [c.memory, c.skills] = await Promise.all([loadProjectMemory(), api.skillsList().catch(() => [])]);
     c.memoryLoaded = true;
   }
 
@@ -1817,7 +1970,7 @@ async function runConversation(c) {
     });
     const res = await api.chatStream(id, {
       messages: requestMessages(c),
-      tools: useTools ? TOOLS : undefined
+      tools: useTools ? toolsFor(c) : undefined
     });
     // IPC events and the invoke reply travel on separate channels, so late deltas can
     // arrive after this resolves. The reply carries the full text; use it as the final state.

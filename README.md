@@ -54,12 +54,16 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - Code blocks get **Copy**, **Insert** and **Apply** buttons.
   - A context meter shows how full Qwen's memory is.
 - **Agent tools:**
-  - `list_files`
-  - `read_file`
-  - `search_code`
-  - `edit_file`
-  - `write_file`
-  - `run_command`
+  - Always available: `list_files`, `read_file`, `search_code`, `edit_file`, `write_file`, `run_command`, `todo_write`.
+  - On demand: `load_skill` (when the project has skills), and `delete_file` / `move_file`, which Qwen loads with `tool_search` when needed.
+  - Independent lookups in one reply run in parallel; edits and commands run one at a time.
+- **Project memory and skills:**
+  - Put standing instructions for Qwen in `QWEN.md` (or `AGENTS.md`) at the project root.
+  - Put task-specific instructions in `.qwen/skills/<name>/SKILL.md`. Personal skills that apply to every project go in `%APPDATA%\qwen-workspace\skills\`.
+  - Qwen sees only each skill's name and description, and loads the rest when a task calls for it.
+- **Plan and compaction:**
+  - For multi-step tasks, Qwen keeps a plan (shown above the message box).
+  - When a conversation nears the context window, older turns are summarized automatically. Click the context meter to summarize now.
 
 ## 1. Get a Qwen model running
 
@@ -142,6 +146,26 @@ Installed copies pick it up within six hours, or right away through **Settings â
   - `F12` open DevTools
 - Qwen can only touch files inside the open project folder.
 - Settings are stored in `%APPDATA%\qwen-workspace\settings.json`, and conversations in `%APPDATA%\qwen-workspace\conversations\`.
+
+## How Qwen's context is assembled
+
+Each request is built in layers, from least to most likely to change, so Ollama can reuse its prompt cache:
+
+1. **System prompt**, fixed for the whole conversation. It holds Qwen's role and rules, the OS and project folder, `QWEN.md`, the list of skills and the names of the deferred tools.
+2. **History**, stored as it happened. Older turns may be replaced by a `<conversation-summary>`.
+3. **A `<system-reminder>` on the newest message only.** It holds the open file and selection, the plan, and the files changed so far. It's rebuilt for every request and never stored, so earlier turns stay byte-identical.
+
+Long tool results come back in pages (`read_file` returns 400 lines at a time with a pointer to the next page), instead of whole files.
+
+### Skill file format
+
+```markdown
+---
+name: build-cmake
+description: How to configure and build this project with CMake on Windows
+---
+Steps, conventions and gotchas go here. Other files in the folder can be loaded by name.
+```
 
 ## Project layout
 

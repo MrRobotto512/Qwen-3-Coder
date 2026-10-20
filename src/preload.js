@@ -47,6 +47,9 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('ollama:pull-progress', fn);
   },
 
+  skillsList: () => ipcRenderer.invoke('skills:list'),
+  skillsRead: (id, file) => ipcRenderer.invoke('skills:read', id, file),
+
   convList: (workspace) => ipcRenderer.invoke('conv:list', workspace),
   convLoad: (id) => ipcRenderer.invoke('conv:load', id),
   convSave: (conv) => ipcRenderer.invoke('conv:save', conv),

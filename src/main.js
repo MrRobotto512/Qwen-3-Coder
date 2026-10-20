@@ -795,3 +795,81 @@ ipcMain.handle('hf:resolve', async (_e, repo) => {
   }
   return result;
 });
+
+// ---------- skills ----------
+// A skill is a folder with SKILL.md (optional front matter: name, description) plus any
+// supporting files. Project skills live in <project>/.qwen/skills, personal ones in the app's
+// data folder. Only names and descriptions go into the prompt; the rest loads on demand.
+function skillRoots() {
+  const roots = [];
+  if (workspaceRoot) roots.push(['project', path.join(workspaceRoot, '.qwen', 'skills')]);
+  roots.push(['user', path.join(app.getPath('userData'), 'skills')]);
+  return roots;
+}
+
+function parseSkill(text, dirName) {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  const meta = {};
+  if (fm) {
+    for (const line of fm[1].split(/\r?\n/)) {
+      const m = /^(\w+)\s*:\s*(.*)$/.exec(line);
+      if (m) meta[m[1].toLowerCase()] = m[2].trim().replace(/^["']|["']$/g, '');
+    }
+  }
+  const body = fm ? text.slice(fm[0].length) : text;
+  const firstLine = body.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) || '';
+  return { name: meta.name || dirName, description: (meta.description || firstLine).slice(0, 300), body };
+}
+
+ipcMain.handle('skills:list', async () => {
+  const byName = new Map();
+  // User skills first so a project skill with the same name replaces it.
+  for (const [scope, root] of skillRoots().reverse()) {
+    let dirs = [];
+    try {
+      dirs = (await fsp.readdir(root, { withFileTypes: true })).filter((d) => d.isDirectory());
+    } catch {
+      continue;
+    }
+    for (const d of dirs) {
+      try {
+        const text = await fsp.readFile(path.join(root, d.name, 'SKILL.md'), 'utf8');
+        const { name, description } = parseSkill(text, d.name);
+        byName.set(name.toLowerCase(), { id: `${scope}:${d.name}`, name, description, scope });
+      } catch {
+        /* no SKILL.md */
+      }
+    }
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+});
+
+ipcMain.handle('skills:read', async (_e, id, file) => {
+  const [scope, dirName] = String(id).split(':');
+  const root = skillRoots().find(([s]) => s === scope)?.[1];
+  if (!root || !/^[\w. -]+$/.test(dirName || '')) throw new Error('Unknown skill');
+  const base = path.join(root, dirName);
+  const target = path.resolve(base, file || 'SKILL.md');
+  if (path.relative(base, target).startsWith('..')) throw new Error('That file is outside the skill folder');
+  const st = await fsp.stat(target);
+  if (st.size > 200 * 1024) throw new Error('Skill file is too large');
+  const text = await fsp.readFile(target, 'utf8');
+  return { content: file ? text : parseSkill(text, dirName).body, files: await listSkillFiles(base) };
+});
+
+// Supporting files in a skill folder (relative, forward slashes), not counting SKILL.md.
+async function listSkillFiles(base, rel = '', out = [], depth = 0) {
+  if (depth > 3 || out.length >= 100) return out;
+  let entries = [];
+  try {
+    entries = await fsp.readdir(path.join(base, rel), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const p = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) await listSkillFiles(base, p, out, depth + 1);
+    else if (e.isFile() && p !== 'SKILL.md') out.push(p);
+  }
+  return out;
+}
