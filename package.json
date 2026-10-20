@@ -1,6 +1,6 @@
 {
   "name": "qwen-workspace",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Desktop coding workspace powered by Qwen (Ollama, LM Studio, or any OpenAI-compatible API)",
   "main": "src/main.js",
   "scripts": {
@@ -11,6 +11,7 @@
   "author": "",
   "dependencies": {
     "dompurify": "^3.4.17",
+    "electron-updater": "^6.8.9",
     "marked": "^18.1.1",
     "monaco-editor": "^0.57.0"
   },
@@ -47,7 +48,14 @@
     },
     "portable": {
       "artifactName": "Qwen-Workspace-${version}-portable.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "MrRobotto512",
+        "repo": "Qwen-3-Coder"
+      }
+    ]
   },
   "repository": {
     "type": "git",

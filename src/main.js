@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const { spawn } = require('child_process');
+const updater = require('./updater');
+const { detectSpecs } = require('./hardware');
 
 const IGNORED_DIRS = new Set([
   'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'out', '.next', '.nuxt',
@@ -27,6 +29,7 @@ const DEFAULT_SETTINGS = {
   followAgent: true,
   contextLength: 32768,
   recentWorkspaces: [],
+  autoCheckUpdates: true,
   lastWorkspace: null,
   fontSize: 14
 };
@@ -583,3 +586,89 @@ async function streamOllama(s, payload, signal, send) {
 
   return { ok: true, content, reasoning, toolCalls, finishReason, usage: { promptTokens, contextLength } };
 }
+
+// ---------- app info & updates ----------
+ipcMain.handle('app:info', () => ({ version: app.getVersion(), kind: updater.installKind(), releasesUrl: updater.RELEASES_URL }));
+ipcMain.handle('update:check', () => updater.checkForUpdate());
+ipcMain.handle('update:download', (event) =>
+  updater.downloadUpdate((p) => {
+    if (!event.sender.isDestroyed()) event.sender.send('update:progress', p);
+  })
+);
+ipcMain.handle('update:install', () => updater.installUpdate());
+ipcMain.handle('shell:openExternal', (_e, url) => {
+  if (/^https:\/\//.test(url)) shell.openExternal(url);
+});
+
+// ---------- hardware & local models ----------
+ipcMain.handle('system:specs', (_e, force) => detectSpecs(force));
+
+// Ollama's own address: the configured server when it is Ollama, otherwise the default local one.
+async function ollamaBase() {
+  const s = loadSettings();
+  if (s.provider === 'ollama' || (await isOllama(s))) return ollamaRoot(s);
+  return 'http://localhost:11434';
+}
+
+ipcMain.handle('ollama:tags', async () => {
+  const base = await ollamaBase();
+  try {
+    const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return { running: false, base, error: `HTTP ${res.status}` };
+    const json = await res.json();
+    return { running: true, base, models: (json.models || []).map((m) => ({ name: m.name, size: m.size, params: m.details?.parameter_size, quant: m.details?.quantization_level })) };
+  } catch (err) {
+    return { running: false, base, error: err.cause?.code || err.message };
+  }
+});
+
+const pulls = new Map();
+
+ipcMain.handle('ollama:pull', async (event, model) => {
+  const base = await ollamaBase();
+  const controller = new AbortController();
+  pulls.set(model, controller);
+  const send = (data) => {
+    if (!event.sender.isDestroyed()) event.sender.send('ollama:pull-progress', { model, ...data });
+  };
+  try {
+    const res = await fetch(`${base}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, name: model, stream: true }),
+      signal: controller.signal
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let lastSent = 0;
+    for await (const chunk of res.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        const j = JSON.parse(line);
+        if (j.error) throw new Error(j.error);
+        // Progress lines arrive very fast; pass on a few per second.
+        const now = Date.now();
+        if (j.status !== 'downloading' || !j.total || now - lastSent > 250 || j.completed === j.total) {
+          lastSent = now;
+          send({ status: j.status, completed: j.completed, total: j.total });
+        }
+      }
+    }
+    return { ok: true };
+  } catch (err) {
+    if (err.name === 'AbortError') return { ok: false, cancelled: true };
+    return { ok: false, error: err.cause?.code === 'ECONNREFUSED' ? `Ollama isn't running at ${base}.` : err.message };
+  } finally {
+    pulls.delete(model);
+  }
+});
+
+ipcMain.handle('ollama:pull-cancel', (_e, model) => {
+  pulls.get(model)?.abort();
+  return true;
+});

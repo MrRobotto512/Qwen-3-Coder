@@ -23,10 +23,22 @@ jobs:
 
       - run: npm ci
 
+      # The release tag (e.g. "0.3.0" or "v0.3.0") is the version the app reports and updates to.
+      - name: Use the release tag as the app version
+        if: github.event_name == 'release'
+        shell: bash
+        run: npm version "${TAG#v}" --no-git-tag-version --allow-same-version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+
       - name: Build installer, portable exe and zip
         run: npx electron-builder --win nsis portable zip --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: List build output
+        shell: bash
+        run: ls -la dist dist/win-unpacked/resources
 
       - uses: actions/upload-artifact@v4
         with:
@@ -34,10 +46,13 @@ jobs:
           path: |
             dist/*.exe
             dist/*.zip
+            dist/latest.yml
+            dist/*.blockmap
 
       - name: Attach builds to the release
         if: github.event_name == 'release'
         shell: bash
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.exe dist/*.zip --clobber
+        # latest.yml and the .blockmap files are what the installed app's updater reads.
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.exe dist/*.zip dist/latest.yml dist/*.blockmap --clobber
         env:
           GH_TOKEN: ${{ github.token }}

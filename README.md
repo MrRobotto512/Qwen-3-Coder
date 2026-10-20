@@ -8,6 +8,16 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
 
 ## Features
 
+- **Models for this PC:**
+  - Detects your GPU, VRAM, RAM and CPU.
+  - Rates each Qwen model as fast (fits in GPU memory), usable (partly on CPU), slow, or too large, and picks a context window that fits.
+  - Marks the best choice as **Recommended**.
+  - Downloads models through Ollama inside the app, with progress.
+
+  Open it from the model menu (top right) or **Settings → Find models**.
+- **Built-in updates:** the app checks GitHub Releases on startup and every 6 hours.
+  - The **installed** version downloads the update in the background and installs it on restart.
+  - The **portable** .exe and the zip open the download page instead.
 - **Follow Qwen:**
   - The editor opens files as Qwen reads them.
   - Edits Qwen makes stay highlighted in the editor.
@@ -51,7 +61,9 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
    ollama pull qwen3-coder:30b      # best local option if you have the memory
    ```
 
-3. That's it. The app talks to Ollama's own API and sets the context window itself (32,768 tokens by default; change it under **⚙ → Context window**). Use a lower value if Ollama runs out of GPU memory. The status line under the chat shows how much of the window is in use.
+3. In the app, open the model menu (top right) → **Models for this PC** and download the recommended model. Or pull one yourself with the commands above.
+
+The app talks to Ollama's own API and sets the context window itself (32,768 tokens by default; change it under **⚙ → Context window**). Use a lower value if Ollama runs out of GPU memory. The status line under the chat shows how much of the window is in use.
 
 ### Option B: LM Studio
 
@@ -88,6 +100,15 @@ npm run dist        # installer, portable .exe and zip in dist/
 
 GitHub Actions also builds the app on every push to `main`; the builds are under **Actions → Build Windows app → Artifacts**. When you publish a release on GitHub, the same workflow attaches the installer, the portable .exe and the zip to it.
 
+## Updates
+
+Publishing a GitHub release is all it takes. The **Build Windows app** workflow:
+1. Sets the app version from the release tag (`0.3.0` or `v0.3.0` both work).
+2. Builds the app.
+3. Attaches the installer, portable .exe, zip and the update feed (`latest.yml`) to the release.
+
+Installed copies pick it up within six hours, or right away through **Settings → Check for updates**.
+
 ## Tips
 
 - Switch between **Agent** and **Chat** below the message box. Agent mode needs a model that supports tool calling (Qwen2.5-Coder, Qwen3 and Qwen3-Coder all do). In Chat mode, Qwen labels full-file code blocks with their path, so **Apply** still works.
@@ -117,5 +138,8 @@ src/
     index.html       Layout
     icons.js         Line icons and file-type badges
     styles.css       Dark theme
-    app.js           Editor, explorer, chat, agent loop, diff view, terminal
+    models.js        Qwen model catalog and hardware fit estimates
+    app.js           Editor, explorer, chat, agent loop, diff view, terminal, updates, model picker
+  hardware.js        GPU / VRAM / RAM / CPU detection
+  updater.js         Update checks against GitHub Releases (electron-updater for the installer)
 ```

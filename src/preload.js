@@ -24,6 +24,27 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('cmd:output', fn);
   },
 
+  appInfo: () => ipcRenderer.invoke('app:info'),
+  checkForUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  onUpdateProgress: (cb) => {
+    const fn = (_e, p) => cb(p);
+    ipcRenderer.on('update:progress', fn);
+    return () => ipcRenderer.removeListener('update:progress', fn);
+  },
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+
+  systemSpecs: (force) => ipcRenderer.invoke('system:specs', force),
+  ollamaTags: () => ipcRenderer.invoke('ollama:tags'),
+  ollamaPull: (model) => ipcRenderer.invoke('ollama:pull', model),
+  ollamaPullCancel: (model) => ipcRenderer.invoke('ollama:pull-cancel', model),
+  onPullProgress: (cb) => {
+    const fn = (_e, p) => cb(p);
+    ipcRenderer.on('ollama:pull-progress', fn);
+    return () => ipcRenderer.removeListener('ollama:pull-progress', fn);
+  },
+
   listModels: () => ipcRenderer.invoke('model:list'),
   chatStream: (id, payload) => ipcRenderer.invoke('chat:stream', id, payload),
   chatAbort: (id) => ipcRenderer.invoke('chat:abort', id),

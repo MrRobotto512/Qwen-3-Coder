@@ -406,3 +406,60 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .09); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, .16); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- models for this PC ---------- */
+.find-models { align-self: flex-start; color: var(--accent-2); }
+.models-box { width: 760px; }
+.specs-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.spec-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-3); border: 1px solid var(--border-2); border-radius: 6px; padding: 3px 9px; font-size: 12px; color: var(--text-2); }
+.spec-chip .i { width: 14px; height: 14px; }
+.spec-chip.gpu { color: var(--text); }
+.spec-chip.warn { color: var(--yellow); border-color: rgba(227, 179, 65, .4); }
+.notice { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; font-size: 12.5px; background: var(--bg-3); border: 1px solid var(--border-2); }
+.notice.warn { background: var(--yellow-bg); border-color: rgba(227, 179, 65, .35); }
+.notice.ok { background: var(--green-bg); border-color: rgba(63, 185, 80, .3); }
+.notice .grow { flex: 1; }
+.notice .i { width: 16px; height: 16px; }
+#m-ollama { display: flex; flex-direction: column; gap: 8px; }
+.m-list { display: flex; flex-direction: column; gap: 8px; overflow: auto; max-height: 56vh; padding-right: 2px; }
+.m-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 14px; padding: 11px 13px; background: var(--bg-1); border: 1px solid var(--border); border-radius: 10px; }
+.m-row.rec { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.m-row.none { opacity: .55; }
+.m-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.m-title .name { font-weight: 600; }
+.m-title .id { font: 11.5px var(--mono); color: var(--text-3); }
+.tagb { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 10px; background: var(--bg-4); color: var(--text-2); }
+.tagb.rec { background: var(--accent); color: #fff; }
+.tagb.strong { background: var(--accent-bg); color: var(--accent-2); }
+.tagb.inst { background: var(--green-bg); color: var(--green); }
+.tagb.use { background: var(--bg-4); color: var(--text); }
+.m-facts { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); grid-column: 1; }
+.fit { font-weight: 600; }
+.fit.gpu { color: var(--green); }
+.fit.mixed { color: var(--yellow); }
+.fit.cpu { color: #f0883e; }
+.fit.none { color: var(--red); }
+.m-note { grid-column: 1; font-size: 12px; color: var(--text-3); }
+.m-act { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 6px; min-width: 150px; }
+.m-act .progress { width: 150px; }
+.progress { height: 5px; border-radius: 3px; background: var(--bg-4); overflow: hidden; }
+.progress i { display: block; height: 100%; background: var(--accent-2); transition: width .2s; }
+.m-act .ptext { font-size: 11px; color: var(--text-3); text-align: right; }
+
+/* ---------- about & updates ---------- */
+.about-row { display: flex; align-items: center; gap: 12px; }
+.about-row .logo { width: 30px; height: 30px; font-size: 16px; border-radius: 8px; }
+.update-row { display: flex; align-items: center; gap: 10px; }
+.sb-update { color: var(--accent-2) !important; font-weight: 600; }
+
+/* ---------- toasts ---------- */
+#toasts { position: fixed; right: 14px; bottom: 34px; z-index: 70; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
+.toast { pointer-events: auto; width: 360px; max-width: calc(100vw - 28px); background: var(--bg-3); border: 1px solid var(--border-2); border-radius: 10px; padding: 11px 12px; box-shadow: 0 12px 34px rgba(0, 0, 0, .5); display: flex; flex-direction: column; gap: 8px; animation: toast-in .16s ease-out; }
+@keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
+.toast .t-main { display: flex; gap: 10px; align-items: flex-start; }
+.toast .t-main > .ico { color: var(--accent-2); margin-top: 1px; }
+.toast .t-text { flex: 1; font-size: 12.5px; line-height: 1.5; }
+.toast .t-text b { font-weight: 600; }
+.toast .t-close { margin: -4px -4px 0 0; }
+.toast .t-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.toast .t-actions button { font-size: 12px; padding: 3px 10px; }

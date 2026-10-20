@@ -1,4 +1,4 @@
-/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge */
+/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge, MODEL_CATALOG, recommendModels, describeSpecs, formatGB, formatContext */
 'use strict';
 
 // `api` is the bridge exposed by preload.js (window.api).
@@ -58,7 +58,13 @@ const state = {
   lastUsage: null,
   fileIndex: null,
   searchRegex: false,
-  quick: { mode: 'open', items: [], sel: 0 }
+  quick: { mode: 'open', items: [], sel: 0 },
+  appInfo: null,
+  update: { phase: 'idle', info: null, percent: 0, error: '' },
+  specs: null,
+  tags: null, // Ollama status and installed models
+  pulls: new Map(), // model id -> { status, completed, total }
+  warned: new Set() // one-time notices already shown this session
 };
 
 let editor;
@@ -129,6 +135,7 @@ require(['vs/editor/editor.main'], async () => {
   restoreLayout();
   applySettingsToUi();
   checkConnection();
+  initUpdates();
 
   if (state.settings.lastWorkspace) await openWorkspace(state.settings.lastWorkspace, true);
   renderAll();
@@ -1985,7 +1992,10 @@ function showAttachMenu(anchor) {
 function openSettings() {
   const s = state.settings;
   for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize', 'contextLength']) $(`#s-${k}`).value = s[k] ?? '';
-  for (const k of ['agentMode', 'includeCurrentFile', 'followAgent']) $(`#s-${k}`).checked = !!s[k];
+  for (const k of ['agentMode', 'includeCurrentFile', 'followAgent', 'autoCheckUpdates']) $(`#s-${k}`).checked = !!s[k];
+  $('#about-version').textContent = state.appInfo?.version || '';
+  $('#about-kind').textContent = KIND_TEXT[state.appInfo?.kind] || '';
+  renderUpdateUi();
   $('#s-approvalMode').value = approvalMode();
   $('#s-allowedCommands').value = (s.allowedCommands || []).join(', ');
   $('#s-test-result').textContent = '';
@@ -1999,7 +2009,7 @@ async function saveSettingsFromUi() {
   patch.fontSize = parseInt($('#s-fontSize').value, 10) || 14;
   patch.contextLength = Math.max(2048, parseInt($('#s-contextLength').value, 10) || 32768);
   patch.allowedCommands = $('#s-allowedCommands').value.split(',').map((x) => x.trim()).filter(Boolean);
-  for (const k of ['agentMode', 'includeCurrentFile', 'followAgent']) patch[k] = $(`#s-${k}`).checked;
+  for (const k of ['agentMode', 'includeCurrentFile', 'followAgent', 'autoCheckUpdates']) patch[k] = $(`#s-${k}`).checked;
   state.settings = await api.setSettings(patch);
   $('#settings-modal').classList.add('hidden');
   applySettingsToUi();
@@ -2028,15 +2038,376 @@ async function fetchModels() {
 async function checkConnection() {
   const dot = $('#conn-dot');
   dot.className = 'dot';
+  const ollama = state.settings.provider === 'ollama';
   try {
     const models = await api.listModels();
     const found = models.includes(state.settings.model);
     dot.className = `dot ${found || !models.length ? 'ok' : 'bad'}`;
     $('#btn-model').title = found || !models.length ? `Connected to ${state.settings.baseUrl}` : `Model "${state.settings.model}" not found on the server. Click to choose another.`;
+    if (found) $('#toasts .toast[data-key="model"]')?.remove();
+    if (ollama && !found) warnOnce(`missing:${state.settings.model}`, () => {
+      const known = MODEL_CATALOG.find((m) => m.id === state.settings.model);
+      toast({
+        key: 'model',
+        icon: 'download',
+        text: [el('b', { text: `${state.settings.model} isn't downloaded yet.` }), models.length ? ' Download it, or pick one of your installed models from the model menu.' : ' Download it, or let the app suggest a model that suits this PC.'],
+        actions: [
+          { label: 'Suggest a model', onClick: openModels },
+          { label: `Download${known ? ` (${formatGB(known.sizeGB)})` : ''}`, primary: true, onClick: () => downloadModel(known || { id: state.settings.model, name: state.settings.model }) }
+        ]
+      });
+    });
   } catch (e) {
     dot.className = 'dot bad';
     $('#btn-model').title = `Not connected: ${e.message}`;
+    if (ollama) warnOnce('ollama-down', () =>
+      toast({
+        key: 'model',
+        icon: 'alert',
+        text: [el('b', { text: "Can't reach Ollama." }), ' Qwen runs on this PC through Ollama. Install it, or start it if it is already installed.'],
+        actions: [
+          { label: 'Retry', onClick: checkConnection },
+          { label: 'Get Ollama', primary: true, onClick: () => api.openExternal('https://ollama.com/download') }
+        ]
+      }));
   }
+}
+
+function warnOnce(key, fn) {
+  if (state.warned.has(key)) return;
+  state.warned.add(key);
+  fn();
+}
+
+// ===================================================================
+// Toasts
+// ===================================================================
+// text: string, node, or an array of them. Each action closes the toast unless `keep` is set.
+function toast({ text, icon: ic = 'info', actions = [], timeout = 0, key }) {
+  if (key) $(`#toasts .toast[data-key="${key}"]`)?.remove();
+  const node = el('div', { class: 'toast', dataset: key ? { key } : {} });
+  const close = () => node.remove();
+  node.append(
+    el('div', { class: 't-main' }, iconEl(ic), el('div', { class: 't-text' }, text), el('button', { class: 'icon-btn t-close', title: 'Dismiss', onclick: close }, iconEl('x'))),
+    actions.length
+      ? el('div', { class: 't-actions' }, ...actions.map((a) =>
+        el('button', { class: a.primary ? 'primary' : 'ghost', onclick: () => { if (!a.keep) close(); a.onClick?.(); } }, a.label)))
+      : null
+  );
+  $('#toasts').append(node);
+  if (timeout) setTimeout(close, timeout);
+  return { close };
+}
+
+// ===================================================================
+// Updates
+// ===================================================================
+const KIND_TEXT = {
+  installer: 'Installed version: updates download and install inside the app.',
+  portable: 'Portable version: updates open the download page.',
+  zip: 'Zip version: updates open the download page.',
+  dev: 'Running from source: update with git pull.'
+};
+
+async function initUpdates() {
+  state.appInfo = await api.appInfo();
+  api.onUpdateProgress((p) => {
+    state.update.percent = p.percent || 0;
+    renderUpdateUi();
+  });
+  if (state.settings.autoCheckUpdates && state.appInfo.kind !== 'dev') {
+    setTimeout(() => checkUpdates(false), 6000);
+    setInterval(() => checkUpdates(false), 6 * 60 * 60 * 1000);
+  }
+}
+
+async function checkUpdates(manual) {
+  if (['checking', 'downloading', 'ready'].includes(state.update.phase)) return;
+  state.update.phase = 'checking';
+  renderUpdateUi();
+  try {
+    const info = await api.checkForUpdate();
+    state.update.info = info;
+    state.update.phase = info.available ? 'available' : 'current';
+    if (info.available && !manual) warnOnce(`update:${info.latest}`, showUpdateToast);
+  } catch (e) {
+    state.update.phase = 'error';
+    state.update.error = cleanError(e);
+  }
+  renderUpdateUi();
+}
+
+function showUpdateToast() {
+  const info = state.update.info;
+  toast({
+    key: 'update',
+    icon: 'download',
+    text: [el('b', { text: `Qwen Workspace ${info.latest} is available.` }), ` You have ${info.current}.`],
+    actions: [
+      { label: "What's new", keep: true, onClick: () => api.openExternal(info.url) },
+      { label: 'Later' },
+      { label: info.canInstall ? 'Update now' : 'Download', primary: true, onClick: startUpdate }
+    ]
+  });
+}
+
+async function startUpdate() {
+  const info = state.update.info;
+  if (!info?.available) return;
+  if (!info.canInstall) {
+    await api.downloadUpdate();
+    flash('Opened the download page');
+    return;
+  }
+  state.update.phase = 'downloading';
+  state.update.percent = 0;
+  renderUpdateUi();
+  try {
+    await api.downloadUpdate();
+    state.update.phase = 'ready';
+    renderUpdateUi();
+    toast({
+      key: 'update',
+      icon: 'download',
+      text: [el('b', { text: `Update ${info.latest} is ready.` }), ' Restart to finish, or it installs when you close the app.'],
+      actions: [{ label: 'Later' }, { label: 'Restart now', primary: true, onClick: () => api.installUpdate() }]
+    });
+  } catch (e) {
+    state.update.phase = 'available';
+    renderUpdateUi();
+    toast({
+      key: 'update',
+      icon: 'alert',
+      text: `The update couldn't be downloaded: ${cleanError(e)}`,
+      actions: [{ label: 'Open download page', primary: true, onClick: () => api.openExternal(info.url) }]
+    });
+  }
+}
+
+function onUpdateButton() {
+  const u = state.update;
+  if (u.phase === 'available') startUpdate();
+  else if (u.phase === 'ready') api.installUpdate();
+  else checkUpdates(true);
+}
+
+function renderUpdateUi() {
+  const u = state.update;
+  const pct = Math.round(u.percent || 0);
+  $('#sb-update').classList.toggle('hidden', !['available', 'downloading', 'ready'].includes(u.phase));
+  $('#sb-update-text').textContent =
+    u.phase === 'available' ? `Update ${u.info.latest} available` : u.phase === 'downloading' ? `Downloading update ${pct}%` : u.phase === 'ready' ? 'Restart to update' : '';
+  const st = $('#update-status');
+  st.className = `hint${u.phase === 'error' ? ' bad' : u.phase === 'current' ? ' ok' : ''}`;
+  st.textContent = {
+    checking: 'Checking…',
+    current: `You're on the latest version${u.info?.latest ? ` (${u.info.latest})` : ''}.`,
+    available: `Version ${u.info?.latest} is available.`,
+    downloading: `Downloading… ${pct}%`,
+    ready: 'Update downloaded. Restart to install it.',
+    error: `Couldn't check for updates: ${u.error}`
+  }[u.phase] || '';
+  const btn = $('#btn-check-updates');
+  btn.lastChild.textContent =
+    u.phase === 'available' ? (u.info.canInstall ? 'Update now' : 'Download update') : u.phase === 'ready' ? 'Restart now' : 'Check for updates';
+  btn.disabled = u.phase === 'checking' || u.phase === 'downloading';
+}
+
+function cleanError(e) {
+  return String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+}
+
+// ===================================================================
+// Models for this PC
+// ===================================================================
+async function showModelMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  let models = [];
+  try {
+    models = await api.listModels();
+  } catch {
+    /* server not reachable */
+  }
+  const items = models.slice(0, 14).map((id) => ({
+    label: id,
+    checked: id === state.settings.model,
+    onClick: async () => {
+      state.settings = await api.setSettings({ model: id });
+      applySettingsToUi();
+      checkConnection();
+      flash(`Model: ${id}`);
+    }
+  }));
+  if (items.length) items.push('-');
+  items.push({ label: 'Models for this PC…', icon: 'cpu', onClick: openModels });
+  items.push({ label: 'Model settings…', icon: 'settings', onClick: openSettings });
+  showMenu(r.right - 240, r.bottom + 4, items);
+}
+
+async function openModels() {
+  $('#settings-modal').classList.add('hidden');
+  $('#models-modal').classList.remove('hidden');
+  if (!state.specs) $('#m-list').replaceChildren(el('div', { class: 'quick-empty', text: 'Checking this PC…' }));
+  const [specs, tags] = await Promise.all([api.systemSpecs(), api.ollamaTags()]);
+  state.specs = specs;
+  state.tags = tags;
+  renderModels();
+}
+
+function installedNames() {
+  return new Set((state.tags?.models || []).map((m) => m.name));
+}
+
+function renderModels() {
+  const specs = state.specs;
+  if (!specs) return;
+  const tags = state.tags || { running: false };
+  const [gpuText, ramText, cpuText] = describeSpecs(specs);
+  $('#m-specs').replaceChildren(
+    el('span', { class: `spec-chip${specs.gpu ? ' gpu' : ' warn'}`, title: specs.gpus.map((g) => `${g.name}: ${formatGB(g.vramGB)}`).join('\n') || 'No GPU detected' }, iconEl('cpu'), gpuText),
+    el('span', { class: 'spec-chip' }, ramText),
+    el('span', { class: 'spec-chip', title: specs.cpu }, cpuText),
+    el('button', { class: 'icon-btn', title: 'Scan again', onclick: async () => { state.specs = await api.systemSpecs(true); state.tags = await api.ollamaTags(); renderModels(); } }, iconEl('refresh'))
+  );
+
+  const usingOllama = state.settings.provider === 'ollama';
+  let notice;
+  if (!tags.running) {
+    notice = el('div', { class: 'notice warn' }, iconEl('alert'),
+      el('span', { class: 'grow', text: "Ollama isn't running. It downloads and runs these models on this PC. Install it (or start it), then refresh." }),
+      el('button', { class: 'ghost', onclick: async () => { state.tags = await api.ollamaTags(); renderModels(); } }, iconEl('refresh'), 'Refresh'),
+      el('button', { class: 'primary', onclick: () => api.openExternal('https://ollama.com/download') }, 'Get Ollama'));
+  } else if (!usingOllama) {
+    notice = el('div', { class: 'notice' }, iconEl('info'),
+      el('span', { class: 'grow', text: 'You are using a different provider. Choosing a model here switches the app to Ollama on this PC.' }));
+  } else {
+    const n = tags.models.length;
+    notice = el('div', { class: 'notice ok' }, iconEl('check'),
+      el('span', { class: 'grow', text: `Ollama is running with ${n} model${n === 1 ? '' : 's'} downloaded.` }));
+  }
+  const notices = [notice];
+  if (!specs.gpu) {
+    notices.push(el('div', { class: 'notice' }, iconEl('info'),
+      el('span', { class: 'grow', text: 'Without a supported GPU, local models run on the CPU and respond slowly. For faster answers, use Qwen through a cloud provider (DashScope or OpenRouter) in Settings.' }),
+      el('button', { class: 'ghost', onclick: openSettings }, 'Open Settings')));
+  }
+  $('#m-ollama').replaceChildren(...notices);
+
+  const { models, recommended, stronger } = recommendModels(specs);
+  const fitOrder = { gpu: 3, mixed: 2, cpu: 1, none: 0 };
+  const sorted = [...models].sort((a, b) => {
+    const pri = (m) => (m.id === recommended?.id ? 2 : m.id === stronger?.id ? 1 : 0);
+    return pri(b) - pri(a) || fitOrder[b.fit] - fitOrder[a.fit] || b.rank - a.rank;
+  });
+  $('#m-list').replaceChildren(...sorted.map((m) => modelRow(m, m.id === recommended?.id, m.id === stronger?.id)));
+}
+
+const FIT_TEXT = {
+  gpu: 'Fast · fits in GPU memory',
+  mixed: 'Usable · partly on CPU',
+  cpu: 'Slow · mostly on CPU',
+  none: 'Too large for this PC'
+};
+
+function modelRow(m, isRec, isStrong) {
+  const installed = installedNames().has(m.id);
+  const inUse = installed && state.settings.provider === 'ollama' && state.settings.model === m.id;
+  const row = el('div', { class: `m-row${isRec ? ' rec' : ''}${m.fit === 'none' ? ' none' : ''}`, dataset: { model: m.id } },
+    el('div', { class: 'm-title' },
+      el('span', { class: 'name', text: m.name }),
+      el('span', { class: 'id', text: m.id }),
+      isRec ? el('span', { class: 'tagb rec', text: 'Recommended' }) : null,
+      isStrong ? el('span', { class: 'tagb strong', text: 'Most capable that runs' }) : null,
+      inUse ? el('span', { class: 'tagb use', text: 'In use' }) : installed ? el('span', { class: 'tagb inst', text: 'Downloaded' }) : null),
+    el('div', { class: 'm-facts' },
+      el('span', { class: `fit ${m.fit}`, text: FIT_TEXT[m.fit] }),
+      el('span', { text: `${formatGB(m.sizeGB)} download` }),
+      el('span', { text: `${formatContext(m.ctx)} context`, title: `Needs about ${formatGB(m.needGB)} of memory at this context size` }),
+      el('span', { text: `Agent: ${m.agent}` })),
+    el('div', { class: 'm-note', text: m.note }),
+    el('div', { class: 'm-act' }));
+  renderModelAction(row, m, installed, inUse, isRec || isStrong);
+  return row;
+}
+
+function renderModelAction(row, m, installed, inUse, highlight) {
+  const act = row.querySelector('.m-act');
+  const pull = state.pulls.get(m.id);
+  if (pull) {
+    const pct = pull.total ? Math.round((pull.completed / pull.total) * 100) : 0;
+    act.replaceChildren(
+      el('div', { class: 'progress' }, el('i', { style: `width:${pct}%` })),
+      el('div', { class: 'ptext', text: pullText(pull) }),
+      el('button', { class: 'ghost', onclick: () => api.ollamaPullCancel(m.id) }, 'Cancel'));
+  } else if (inUse) {
+    act.replaceChildren(el('button', { class: 'ghost', disabled: true }, iconEl('check'), 'In use'));
+  } else if (installed) {
+    act.replaceChildren(el('button', { class: 'primary', onclick: () => useModel(m) }, 'Use'));
+  } else {
+    act.replaceChildren(el('button', {
+      class: highlight ? 'primary' : 'ghost',
+      disabled: !state.tags?.running,
+      title: state.tags?.running ? `Download ${m.id} with Ollama` : 'Start Ollama first',
+      onclick: () => downloadModel(m)
+    }, iconEl('download'), `Download ${formatGB(m.sizeGB)}`));
+  }
+}
+
+function pullText(p) {
+  if (p.status === 'downloading' || (p.total && /^pulling [0-9a-f]/.test(p.status))) {
+    return `${formatGB((p.completed || 0) / 1e9)} of ${formatGB((p.total || 0) / 1e9)}`;
+  }
+  return (p.status || 'Starting').replace(/^\w/, (c) => c.toUpperCase());
+}
+
+api.onPullProgress((p) => {
+  const cur = state.pulls.get(p.model);
+  if (!cur) return;
+  Object.assign(cur, p);
+  const row = $(`#m-list .m-row[data-model="${CSS.escape(p.model)}"]`);
+  if (!row) return;
+  const pct = cur.total ? Math.round((cur.completed / cur.total) * 100) : 0;
+  const bar = row.querySelector('.progress i');
+  if (bar) {
+    bar.style.width = `${pct}%`;
+    row.querySelector('.ptext').textContent = pullText(cur);
+  }
+});
+
+async function downloadModel(m) {
+  if (state.pulls.has(m.id)) return;
+  state.pulls.set(m.id, { status: 'starting', completed: 0, total: 0 });
+  if (!$('#models-modal').classList.contains('hidden')) renderModels();
+  flash(`Downloading ${m.id}…`);
+  const res = await api.ollamaPull(m.id);
+  state.pulls.delete(m.id);
+  state.tags = await api.ollamaTags();
+  if (res.ok) {
+    const entry = state.specs ? recommendModels(state.specs).models.find((x) => x.id === m.id) : null;
+    const target = entry || m;
+    toast({
+      key: `pull-${m.id}`,
+      icon: 'check',
+      text: [el('b', { text: m.name || m.id }), ' is downloaded.'],
+      actions: state.settings.model === m.id && state.settings.provider === 'ollama' ? [] : [{ label: 'Use it', primary: true, onClick: () => useModel(target) }],
+      timeout: 20000
+    });
+    checkConnection();
+  } else if (!res.cancelled) {
+    toast({ key: `pull-${m.id}`, icon: 'alert', text: `Downloading ${m.id} failed: ${res.error}` });
+  }
+  if (!$('#models-modal').classList.contains('hidden')) renderModels();
+}
+
+async function useModel(m) {
+  const base = state.tags?.base || 'http://localhost:11434';
+  const patch = { provider: 'ollama', baseUrl: `${base}/v1`, model: m.id };
+  if (m.ctx) patch.contextLength = m.ctx;
+  state.settings = await api.setSettings(patch);
+  applySettingsToUi();
+  checkConnection();
+  if (!$('#models-modal').classList.contains('hidden')) renderModels();
+  flash(`Using ${m.id}${m.ctx ? ` · ${formatContext(m.ctx)} context` : ''}`);
 }
 
 // ===================================================================
@@ -2153,7 +2524,14 @@ function bindUi() {
   $('#btn-quick').onclick = () => openQuick('open');
   $('#btn-settings').onclick = openSettings;
   $('#act-settings').onclick = openSettings;
-  $('#btn-model').onclick = openSettings;
+  $('#btn-model').onclick = (e) => showModelMenu(e.currentTarget);
+  $('#s-find-models').onclick = openModels;
+  $('#m-close').onclick = () => $('#models-modal').classList.add('hidden');
+  $('#models-modal').onmousedown = (e) => {
+    if (e.target.id === 'models-modal') $('#models-modal').classList.add('hidden');
+  };
+  $('#btn-check-updates').onclick = onUpdateButton;
+  $('#sb-update').onclick = onUpdateButton;
   $$('.act[data-view]').forEach((b) => (b.onclick = () => showView(b.dataset.view, true)));
   $('#act-terminal').onclick = () => showTerminal($('#terminal').classList.contains('hidden'));
   $('#sb-terminal').onclick = () => showTerminal($('#terminal').classList.contains('hidden'));
@@ -2269,6 +2647,7 @@ function bindUi() {
     if (e.key === 'Escape') {
       $('#ctx-menu').classList.add('hidden');
       if (!$('#settings-modal').classList.contains('hidden')) $('#settings-modal').classList.add('hidden');
+      if (!$('#models-modal').classList.contains('hidden')) $('#models-modal').classList.add('hidden');
       if (!$('#input-modal').classList.contains('hidden')) closeInput(null);
       if (!$('#quick-modal').classList.contains('hidden')) closeQuick();
       return;
