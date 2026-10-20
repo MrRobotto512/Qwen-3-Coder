@@ -23,13 +23,14 @@ function installKind() {
   return 'zip';
 }
 
+// Pulls X.Y.Z out of tags like "0.3.0", "v0.3.0", "v.0.3.0" or "release-0.3.0".
 function parseVersion(v) {
-  return String(v || '')
-    .trim()
-    .replace(/^v/i, '')
-    .split(/[-+]/)[0]
-    .split('.')
-    .map((n) => parseInt(n, 10) || 0);
+  const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(v || ''));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3] || 0)] : [0, 0, 0];
+}
+
+function versionString(v) {
+  return parseVersion(v).join('.');
 }
 
 function isNewer(a, b) {
@@ -51,7 +52,7 @@ async function checkForUpdate() {
   if (res.status === 404) return (lastCheck = { current, kind, available: false, latest: null, url: RELEASES_URL });
   if (!res.ok) throw new Error(`GitHub returned HTTP ${res.status}`);
   const rel = await res.json();
-  const latest = String(rel.tag_name || rel.name || '').replace(/^v/i, '');
+  const latest = versionString(rel.tag_name || rel.name);
   const hasUpdateFeed = (rel.assets || []).some((a) => a.name === 'latest.yml');
   lastCheck = {
     current,

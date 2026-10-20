@@ -4,11 +4,18 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Tag of an existing release to build and attach files to (leave empty for a test build)
+        required: false
   release:
     types: [published]
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
 
 jobs:
   build:
@@ -23,13 +30,19 @@ jobs:
 
       - run: npm ci
 
-      # The release tag (e.g. "0.3.0" or "v0.3.0") is the version the app reports and updates to.
+      # The release tag is the version the app reports and updates to. Any tag containing
+      # X.Y.Z works: 0.3.0, v0.3.0, v.0.3.0, release-0.3.0.
       - name: Use the release tag as the app version
-        if: github.event_name == 'release'
+        if: env.RELEASE_TAG != ''
         shell: bash
-        run: npm version "${TAG#v}" --no-git-tag-version --allow-same-version
-        env:
-          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION=$(echo "$RELEASE_TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Release tag '$RELEASE_TAG' has no version number in it. Use a tag like 0.3.0 or v0.3.0."
+            exit 1
+          fi
+          echo "Building version $VERSION for release $RELEASE_TAG"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Build installer, portable exe and zip
         run: npx electron-builder --win nsis portable zip --x64 --publish never
@@ -50,9 +63,9 @@ jobs:
             dist/*.blockmap
 
       - name: Attach builds to the release
-        if: github.event_name == 'release'
+        if: env.RELEASE_TAG != ''
         shell: bash
         # latest.yml and the .blockmap files are what the installed app's updater reads.
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.exe dist/*.zip dist/latest.yml dist/*.blockmap --clobber
+        run: gh release upload "$RELEASE_TAG" dist/*.exe dist/*.zip dist/latest.yml dist/*.blockmap --clobber
         env:
           GH_TOKEN: ${{ github.token }}
