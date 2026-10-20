@@ -1207,16 +1207,42 @@ function truncate(s) {
   return s.length > MAX_TOOL_RESULT ? s.slice(0, MAX_TOOL_RESULT) + `\n... [truncated ${s.length - MAX_TOOL_RESULT} chars]` : s;
 }
 
-// Some Qwen builds put tool calls in the text instead of structured tool_calls, either as
-// JSON (<tool_call>{"name": ..., "arguments": {...}}</tool_call>) or in Qwen3-Coder's XML
-// style (<function=name><parameter=key>value</parameter></function>), sometimes with
-// closing tags missing.
+// Some Qwen builds put tool calls in the text instead of structured tool_calls:
+// - JSON in tags: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
+// - Qwen3-Coder's XML style: <function=name><parameter=key>value</parameter></function>,
+//   sometimes with closing tags missing
+// - bare JSON, often in a ```json fence: {"name": "list_files", "arguments": {...}}
+//   (Qwen2.5-Coder in Ollama does this). Only objects naming one of our tools count, so
+//   ordinary JSON in an answer is left alone.
 const TOOL_TEXT_MARKER = /<tool_call>|<function=[\w.-]+>/;
+const JSON_TOOL_CALL = new RegExp(`(?:\`\`\`[\\w-]*[ \\t]*\\r?\\n\\s*)?\\{\\s*"name"\\s*:\\s*"(?:${TOOLS.map((t) => t.function.name).join('|')})"`);
 const MULTILINE_PARAMS = new Set(['content', 'old_text', 'new_text']);
 
 function textToolCallStart(content) {
-  const m = TOOL_TEXT_MARKER.exec(content);
-  return m ? m.index : -1;
+  const indexes = [TOOL_TEXT_MARKER.exec(content), JSON_TOOL_CALL.exec(content)].filter(Boolean).map((m) => m.index);
+  return indexes.length ? Math.min(...indexes) : -1;
+}
+
+// Returns the balanced {...} object starting at `from`, respecting strings.
+function readJsonObject(text, from) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+    } else if (c === '"') {
+      inString = true;
+    } else if (c === '{') {
+      depth++;
+    } else if (c === '}' && --depth === 0) {
+      return text.slice(from, i + 1);
+    }
+  }
+  return null;
 }
 
 function extractTextToolCalls(content) {
@@ -1243,6 +1269,22 @@ function extractTextToolCalls(content) {
         args[key] = v;
       }
       add(fm[1], args);
+    }
+  } else if (!tail.includes('<tool_call>')) {
+    const known = new Set(TOOLS.map((t) => t.function.name));
+    const re = /\{\s*"name"\s*:/g;
+    let m;
+    while ((m = re.exec(tail))) {
+      const json = readJsonObject(tail, m.index);
+      if (!json) break;
+      re.lastIndex = m.index + json.length;
+      try {
+        const obj = JSON.parse(json);
+        const args = obj.arguments ?? obj.parameters;
+        if (known.has(obj.name) && args !== undefined) add(obj.name, typeof args === 'string' ? JSON.parse(args) : args);
+      } catch {
+        /* not a tool call */
+      }
     }
   } else {
     const re = /<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|$)/g;
