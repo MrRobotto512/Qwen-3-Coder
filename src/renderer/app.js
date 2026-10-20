@@ -992,36 +992,89 @@ const TOOL_INFO = {
   run_command: { icon: 'terminal', verb: 'Run', doing: 'Running' }
 };
 
-function systemPrompt() {
+// Context is assembled in layers, from least to most likely to change, so Ollama can reuse its
+// KV cache: the system prompt stays byte-identical for the whole conversation (identity, rules,
+// environment, project memory), and editor state that changes between turns goes into a
+// <system-reminder> on the newest message only, which is never stored in the history.
+const MEMORY_FILES = ['QWEN.md', 'AGENTS.md'];
+const MAX_MEMORY = 20_000;
+
+async function loadProjectMemory() {
+  for (const name of MEMORY_FILES) {
+    try {
+      const text = await api.read(name);
+      return { name, text: text.length > MAX_MEMORY ? text.slice(0, MAX_MEMORY) + '\n... [truncated]' : text };
+    } catch {
+      /* not present */
+    }
+  }
+  return null;
+}
+
+function systemPrompt(c) {
+  const agent = state.settings.agentMode && !!state.ws;
+  const key = `${agent}|${c.workspace}|${c.memory?.text || ''}`;
+  if (c.sysPrompt?.key === key) return c.sysPrompt.text;
   const win = state.ws?.platform === 'win32';
-  const lines = [
-    'You are Qwen, an expert software engineer pair-programming with the user inside "Qwen Workspace", a desktop code editor.',
-    state.ws ? `The user's project folder is: ${state.ws.root}` : 'No project folder is open yet.',
-    `Operating system: ${win ? 'Windows (commands run in cmd.exe — use Windows syntax, e.g. "dir", "type", "&&")' : state.ws?.platform || 'unknown'}.`,
-    state.active ? `The file currently open in the editor is: ${state.active}` : '',
-    ''
+  const parts = [
+    '<role>You are Qwen, an expert software engineer pair-programming with the user inside "Qwen Workspace", a desktop code editor.</role>',
+    '',
+    '<context>',
+    state.ws ? `Project folder: ${state.ws.root}` : 'No project folder is open yet.',
+    `Operating system: ${win ? 'Windows (commands run in cmd.exe; use Windows syntax such as "dir", "type", "&&")' : state.ws?.platform || 'unknown'}`,
+    `Conversation started: ${new Date(c.createdAt).toDateString()}`,
+    c.memory ? `<project_memory file="${c.memory.name}">\n${c.memory.text}\n</project_memory>` : null,
+    '</context>',
+    '',
+    '<instructions>'
   ];
-  if (state.settings.agentMode && state.ws) {
-    lines.push(
-      'You can use tools to inspect and change the project. Guidelines:',
-      '- Explore before you change things: use list_files, search_code and read_file to understand the relevant code. Never guess file contents.',
-      '- Always read a file before editing it. Use edit_file for targeted changes and write_file for new files or full rewrites.',
-      '- All paths are relative to the project root and use forward slashes.',
-      "- Tool results are produced by the tools you call, not pasted by the user. Use them to keep working on the user's request.",
-      '- Keep going with tool calls until the task is done; do not stop to describe what you are about to do.',
-      '- If the user rejects an edit or command, do not retry the same thing — ask what they want instead.',
-      '- Make focused, minimal changes that match the existing code style. Do not create files the task does not need.',
-      '- When you are done, reply with a short summary of what you changed and anything the user should do next.'
+  if (agent) {
+    parts.push(
+      '- Explore before changing things: use search_code and read_file instead of guessing file contents.',
+      '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
+      '- Paths are relative to the project root and use forward slashes.',
+      '- Tool results come from the tools you call, not from the user. Keep working until the task is done instead of stopping to describe what you will do next.',
+      '- A message may end with a <system-reminder> from the app (not the user) describing the editor and task state. Use it as context; never reply to it directly.',
+      '- If the user rejects an edit or command, do not retry it; ask what they want instead.',
+      '- Make focused, minimal changes that match the existing code style.',
+      '- When done, reply with a short summary of what changed and anything the user should do next.'
     );
   } else {
-    lines.push(
-      'Answer clearly and concisely. Use Markdown.',
-      'When you provide the complete contents of a file, label the code fence with the language and the file path, like:',
-      '```python src/main.py',
-      'The user can then apply it to that file with one click. For partial snippets, use a normal fence with just the language.'
+    parts.push(
+      '- Answer clearly and concisely in Markdown.',
+      '- When you give the complete contents of a file, label the code fence with the language and the path (for example ```python src/main.py) so the user can apply it with one click. Use a plain language fence for partial snippets.',
+      '- A message may end with a <system-reminder> from the app describing the editor state. Use it as context; never reply to it directly.'
     );
   }
+  parts.push('</instructions>');
+  const text = parts.filter((x) => x !== null).join('\n');
+  c.sysPrompt = { key, text };
+  return text;
+}
+
+// Editor and task state for this turn only.
+function turnReminder(c) {
+  const lines = [];
+  if (state.active && c === state.conv) {
+    const sel = editor.getSelection();
+    lines.push(`Open in the editor: ${state.active}${sel && !sel.isEmpty() ? ` (lines ${sel.startLineNumber}-${sel.endLineNumber} selected)` : ''}`);
+  }
+  if (c.changes.size) {
+    lines.push(`Files changed in this conversation: ${[...c.changes].map(([p, ch]) => `${p} (${ch.original === null ? 'created' : `+${ch.added} -${ch.removed}`})`).join(', ')}`);
+  }
   return lines.join('\n');
+}
+
+// The messages for one model request: fixed system prompt, stored history, and the turn's
+// reminder appended to the newest message (user or tool result).
+function requestMessages(c) {
+  const msgs = [...c.history];
+  const reminder = turnReminder(c);
+  const last = msgs[msgs.length - 1];
+  if (reminder && last && last.role !== 'assistant') {
+    msgs[msgs.length - 1] = { ...last, content: `${last.content}\n\n<system-reminder>\n${reminder}\n</system-reminder>` };
+  }
+  return [{ role: 'system', content: systemPrompt(c) }, ...msgs];
 }
 
 function describeCall(name, args) {
@@ -1638,6 +1691,12 @@ async function send() {
   }
   c.mode = state.settings.agentMode ? 'agent' : 'chat';
   c.model = state.settings.model;
+  // Project memory is read once per conversation (and again after the app restarts) so the
+  // system prompt stays the same from turn to turn.
+  if (!c.memoryLoaded && state.ws) {
+    c.memory = await loadProjectMemory();
+    c.memoryLoaded = true;
+  }
 
   const att = await buildAttachments();
   renderChips();
@@ -1684,7 +1743,7 @@ async function runConversation(c) {
       else if (ev.type === 'reasoning') view.appendReasoning(ev.data);
     });
     const res = await api.chatStream(id, {
-      messages: [{ role: 'system', content: systemPrompt() }, ...c.history],
+      messages: requestMessages(c),
       tools: useTools ? TOOLS : undefined
     });
     // IPC events and the invoke reply travel on separate channels, so late deltas can
