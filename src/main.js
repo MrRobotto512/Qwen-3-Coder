@@ -735,3 +735,63 @@ ipcMain.handle('conv:delete', (_e, id) => {
   updateConvIndex((index) => index.filter((c) => c.id !== id));
   return true;
 });
+
+// ---------- long context (YaRN) ----------
+// What a downloaded model was trained for, and whether its GGUF carries YaRN rope scaling.
+ipcMain.handle('ollama:show', async (_e, model) => {
+  const base = await ollamaBase();
+  try {
+    const res = await fetch(`${base}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, name: model }),
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!res.ok) return null;
+    const info = (await res.json()).model_info || {};
+    const arch = info['general.architecture'];
+    const key = (k) => info[`${arch}.${k}`] ?? null;
+    return {
+      arch,
+      contextLength: key('context_length'),
+      rope: { type: key('rope.scaling.type'), factor: key('rope.scaling.factor'), originalContext: key('rope.scaling.original_context_length') }
+    };
+  } catch {
+    return null;
+  }
+});
+
+// Finds the 4-bit GGUF in a Hugging Face repo and the name Ollama pulls it by
+// (hf.co/<repo>:<quant>). Unsharded files only; Ollama can't pull split GGUFs from hf.co.
+const hfCache = new Map();
+const QUANT_PREFERENCE = [/^Q4_K_M$/i, /^UD-Q4_K_XL$/i, /^Q4_K_S$/i, /^Q4_0$/i, /^Q5_K_M$/i, /^Q3_K_M$/i];
+
+ipcMain.handle('hf:resolve', async (_e, repo) => {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(String(repo))) throw new Error('Invalid repository name');
+  if (hfCache.has(repo)) return hfCache.get(repo);
+  let result;
+  try {
+    // HF_ENDPOINT is the standard way to point Hugging Face tools at a mirror.
+    const endpoint = (process.env.HF_ENDPOINT || 'https://huggingface.co').replace(/\/+$/, '');
+    const res = await fetch(`${endpoint}/api/models/${repo}?blobs=true`, { signal: AbortSignal.timeout(15000) });
+    if (res.status === 404 || res.status === 401) {
+      result = { status: 'missing', repo };
+    } else if (!res.ok) {
+      throw new Error(`Hugging Face returned HTTP ${res.status}`);
+    } else {
+      const files = ((await res.json()).siblings || [])
+        .map((s) => ({ name: s.rfilename, size: s.size || 0, quant: /((?:UD-)?(?:I?Q\d\w*|BF16|F16|F32))\.gguf$/i.exec(s.rfilename)?.[1] }))
+        .filter((f) => f.quant && !f.name.includes('/') && !/mmproj/i.test(f.name) && !/-\d{5}-of-\d{5}\.gguf$/i.test(f.name));
+      let file = null;
+      for (const pref of QUANT_PREFERENCE) if ((file = files.find((f) => pref.test(f.quant)))) break;
+      result = file
+        ? { status: 'ok', repo, file: file.name, tag: file.quant, sizeGB: file.size / 1e9, ollamaId: `hf.co/${repo}:${file.quant}` }
+        : { status: 'missing', repo };
+    }
+    hfCache.set(repo, result);
+  } catch (err) {
+    // Not cached, so it is retried next time.
+    result = { status: 'error', repo, error: err.cause?.code || err.message };
+  }
+  return result;
+});

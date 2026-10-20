@@ -1,4 +1,4 @@
-/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge, MODEL_CATALOG, recommendModels, describeSpecs, formatGB, formatContext */
+/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge, MODEL_CATALOG, recommendModels, recommendLongContext, catalogEntryFor, describeSpecs, formatGB, formatContext */
 'use strict';
 
 // `api` is the bridge exposed by preload.js (window.api).
@@ -59,6 +59,9 @@ const state = {
   specs: null,
   tags: null, // Ollama status and installed models
   pulls: new Map(), // model id -> { status, completed, total }
+  modelsMode: 'standard', // or 'long' (YaRN builds) in the Models window
+  hf: new Map(), // Hugging Face repo -> resolved YaRN build ({ status, ollamaId, sizeGB, ... })
+  modelInfo: null, // { contextLength, rope } of the model in use, from Ollama
   warned: new Set() // one-time notices already shown this session
 };
 
@@ -1692,6 +1695,17 @@ async function runConversation(c) {
     if (res.usage?.promptTokens && res.usage.contextLength) {
       c.usage = res.usage;
       if (c === state.conv) updateCtxMeter();
+      const entry = catalogEntryFor(state.settings.model);
+      const trained = state.modelInfo?.contextLength || entry?.nativeCtx;
+      if (res.usage.promptTokens >= res.usage.contextLength * 0.8 && entry?.yarn && trained && trained < entry.yarn.maxCtx && state.modelInfo?.rope?.type !== 'yarn') {
+        warnOnce(`yarn-suggest:${c.id}`, () =>
+          toast({
+            key: 'ctx',
+            icon: 'info',
+            text: [el('b', { text: 'This conversation is filling Qwen\'s memory.' }), ` A long-context (YaRN) build of this model can hold up to ${formatContext(entry.yarn.maxCtx)} tokens.`],
+            actions: [{ label: 'Later' }, { label: 'Show long-context builds', primary: true, onClick: () => openModels('long') }]
+          }));
+      }
       if (res.usage.promptTokens >= res.usage.contextLength * 0.95) {
         addError(c, `The conversation (${res.usage.promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${res.usage.contextLength.toLocaleString()}), so the oldest messages — including your instructions — were cut off. Raise "Context window" in Settings or start a new chat.`);
       }
@@ -2453,6 +2467,8 @@ async function checkConnection() {
     dot.className = `dot ${found || !models.length ? 'ok' : 'bad'}`;
     $('#btn-model').title = found || !models.length ? `Connected to ${state.settings.baseUrl}` : `Model "${state.settings.model}" not found on the server. Click to choose another.`;
     if (found) $('#toasts .toast[data-key="model"]')?.remove();
+    if (found && ollama) checkContextFits();
+    else state.modelInfo = null;
     if (ollama && !found) warnOnce(`missing:${state.settings.model}`, () => {
       const known = MODEL_CATALOG.find((m) => m.id === state.settings.model);
       toast({
@@ -2479,6 +2495,33 @@ async function checkConnection() {
         ]
       }));
   }
+}
+
+// Past the length a model was trained for (and without YaRN in its GGUF), it loses track of
+// the conversation, so warn when the context window is set beyond that.
+async function checkContextFits() {
+  const model = state.settings.model;
+  const info = await api.ollamaShow(model);
+  if (model !== state.settings.model) return;
+  state.modelInfo = info;
+  const trained = info?.contextLength;
+  const yarn = info?.rope?.type === 'yarn';
+  $('#btn-model').title = trained
+    ? `${model} · handles ${formatContext(trained)}${yarn ? ` (YaRN ×${info.rope.factor} from ${formatContext(info.rope.originalContext)})` : ''} · context window set to ${formatContext(state.settings.contextLength)}`
+    : $('#btn-model').title;
+  const ctx = Number(state.settings.contextLength);
+  if (!trained || ctx <= trained) return;
+  const entry = catalogEntryFor(model);
+  warnOnce(`ctx-over:${model}:${ctx}`, () =>
+    toast({
+      key: 'ctx',
+      icon: 'alert',
+      text: [el('b', { text: `${model} handles ${formatContext(trained)} tokens, but the context window is set to ${formatContext(ctx)}.` }), ' Past that it loses track of the conversation.' + (entry?.yarn ? ' A long-context (YaRN) build can go further.' : '')],
+      actions: [
+        { label: `Set to ${formatContext(trained)}`, onClick: async () => { state.settings = await api.setSettings({ contextLength: trained }); applySettingsToUi(); flash(`Context window: ${formatContext(trained)}`); } },
+        entry?.yarn ? { label: 'Long-context builds', primary: true, onClick: () => openModels('long') } : null
+      ].filter(Boolean)
+    }));
 }
 
 function warnOnce(key, fn) {
@@ -2647,12 +2690,14 @@ async function showModelMenu(anchor) {
     }
   }));
   if (items.length) items.push('-');
-  items.push({ label: 'Models for this PC…', icon: 'cpu', onClick: openModels });
+  items.push({ label: 'Models for this PC…', icon: 'cpu', onClick: () => openModels('standard') });
+  items.push({ label: 'Long context (YaRN)…', icon: 'book', onClick: () => openModels('long') });
   items.push({ label: 'Model settings…', icon: 'settings', onClick: openSettings });
   showMenu(r.right - 240, r.bottom + 4, items);
 }
 
-async function openModels() {
+async function openModels(mode) {
+  if (typeof mode === 'string') state.modelsMode = mode;
   $('#settings-modal').classList.add('hidden');
   $('#models-modal').classList.remove('hidden');
   if (!state.specs) $('#m-list').replaceChildren(el('div', { class: 'quick-empty', text: 'Checking this PC…' }));
@@ -2701,13 +2746,57 @@ function renderModels() {
   }
   $('#m-ollama').replaceChildren(...notices);
 
-  const { models, recommended, stronger } = recommendModels(specs);
+  $$('#m-mode button').forEach((b) => b.classList.toggle('on', b.dataset.mode === state.modelsMode));
   const fitOrder = { gpu: 3, mixed: 2, cpu: 1, none: 0 };
+  if (state.modelsMode === 'long') {
+    notices.push(el('div', { class: 'notice' }, iconEl('info'),
+      el('span', { class: 'grow', text: "YaRN stretches a model's position encoding so it can read past the 32K tokens it was trained on, up to 128K. Ollama can't switch YaRN on by itself, so these are separate downloads with YaRN built in (Unsloth's builds on Hugging Face). Qwen notes YaRN can slightly lower quality on short prompts: use these for big tasks and keep a standard model for everyday work. Tip: setting OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0 for Ollama roughly halves the memory long contexts need." })));
+    $('#m-ollama').replaceChildren(...notices);
+    const { models, recommended } = recommendLongContext(specs);
+    const sorted = [...models].sort((a, b) => (b.id === recommended?.id) - (a.id === recommended?.id) || fitOrder[b.fit] - fitOrder[a.fit] || b.rank - a.rank);
+    $('#m-list').replaceChildren(...sorted.map((plan) => modelRow(longVariant(plan), plan.id === recommended?.id, false)));
+    return;
+  }
+  const { models, recommended, stronger } = recommendModels(specs);
   const sorted = [...models].sort((a, b) => {
     const pri = (m) => (m.id === recommended?.id ? 2 : m.id === stronger?.id ? 1 : 0);
     return pri(b) - pri(a) || fitOrder[b.fit] - fitOrder[a.fit] || b.rank - a.rank;
   });
   $('#m-list').replaceChildren(...sorted.map((m) => modelRow(m, m.id === recommended?.id, m.id === stronger?.id)));
+}
+
+// The row to show for a long-context plan: the regular model when its native context is
+// enough, otherwise its YaRN build from Hugging Face (looked up on first view).
+function longVariant(plan) {
+  const detail = plan.needsYarn
+    ? `trained on ${formatContext(plan.nativeCtx)} · YaRN ×${Math.round(plan.yarn.maxCtx / plan.nativeCtx)}`
+    : `native ${formatContext(plan.nativeCtx)}, no YaRN needed`;
+  if (!plan.needsYarn) return { ...plan, ctxDetail: detail };
+  const hf = state.hf.get(plan.yarn.repo);
+  if (!hf) resolveHf(plan.yarn.repo);
+  return {
+    ...plan,
+    id: hf?.status === 'ok' ? hf.ollamaId : null,
+    displayId: hf?.status === 'ok' ? hf.ollamaId : `hf.co/${plan.yarn.repo}`,
+    name: `${plan.name} ${formatContext(plan.yarn.maxCtx)}`,
+    sizeGB: hf?.sizeGB || plan.sizeGB,
+    hf: hf || { status: 'loading' },
+    yarnBuild: true,
+    ctxDetail: detail
+  };
+}
+
+async function resolveHf(repo) {
+  if (state.hf.has(repo)) return;
+  state.hf.set(repo, { status: 'loading' });
+  let r;
+  try {
+    r = await api.hfResolve(repo);
+  } catch (e) {
+    r = { status: 'error', error: cleanError(e) };
+  }
+  state.hf.set(repo, r);
+  if (!$('#models-modal').classList.contains('hidden') && state.modelsMode === 'long') renderModels();
 }
 
 const FIT_TEXT = {
@@ -2718,19 +2807,20 @@ const FIT_TEXT = {
 };
 
 function modelRow(m, isRec, isStrong) {
-  const installed = installedNames().has(m.id);
-  const inUse = installed && state.settings.provider === 'ollama' && state.settings.model === m.id;
-  const row = el('div', { class: `m-row${isRec ? ' rec' : ''}${m.fit === 'none' ? ' none' : ''}`, dataset: { model: m.id } },
+  const installed = !!m.id && installedNames().has(m.id);
+  const inUse = installed && state.settings.provider === 'ollama' && state.settings.model === m.id && (!m.ctxDetail || state.settings.contextLength === m.ctx);
+  const row = el('div', { class: `m-row${isRec ? ' rec' : ''}${m.fit === 'none' ? ' none' : ''}`, dataset: { model: m.id || m.displayId } },
     el('div', { class: 'm-title' },
       el('span', { class: 'name', text: m.name }),
-      el('span', { class: 'id', text: m.id }),
+      el('span', { class: 'id', text: m.displayId || m.id }),
+      m.yarnBuild ? el('span', { class: 'tagb yarn', text: 'YaRN' }) : null,
       isRec ? el('span', { class: 'tagb rec', text: 'Recommended' }) : null,
       isStrong ? el('span', { class: 'tagb strong', text: 'Most capable that runs' }) : null,
       inUse ? el('span', { class: 'tagb use', text: 'In use' }) : installed ? el('span', { class: 'tagb inst', text: 'Downloaded' }) : null),
     el('div', { class: 'm-facts' },
       el('span', { class: `fit ${m.fit}`, text: FIT_TEXT[m.fit] }),
       el('span', { text: `${formatGB(m.sizeGB)} download` }),
-      el('span', { text: `${formatContext(m.ctx)} context`, title: `Needs about ${formatGB(m.needGB)} of memory at this context size` }),
+      el('span', { text: `${formatContext(m.ctx)} context`, title: `Needs about ${formatGB(m.needGB)} of memory at this context size` }, m.ctxDetail ? el('span', { class: 'ctx-detail', text: ` (${m.ctxDetail})` }) : null),
       el('span', { text: `Agent: ${m.agent}` })),
     el('div', { class: 'm-note', text: m.note }),
     el('div', { class: 'm-act' }));
@@ -2740,6 +2830,15 @@ function modelRow(m, isRec, isStrong) {
 
 function renderModelAction(row, m, installed, inUse, highlight) {
   const act = row.querySelector('.m-act');
+  if (m.yarnBuild && !m.id) {
+    const st = m.hf.status;
+    act.replaceChildren(
+      st === 'error'
+        ? el('button', { class: 'ghost', title: m.hf.error, onclick: () => { state.hf.delete(m.yarn.repo); renderModels(); } }, iconEl('refresh'), 'Retry')
+        : el('button', { class: 'ghost', disabled: true, title: st === 'missing' ? `No 4-bit GGUF found in ${m.yarn.repo}` : '' }, st === 'loading' ? 'Checking Hugging Face…' : 'Not available'),
+      ...(st === 'error' ? [el('div', { class: 'ptext', text: "Couldn't reach Hugging Face" })] : []));
+    return;
+  }
   const pull = state.pulls.get(m.id);
   if (pull) {
     const pct = pull.total ? Math.round((pull.completed / pull.total) * 100) : 0;
@@ -2750,7 +2849,7 @@ function renderModelAction(row, m, installed, inUse, highlight) {
   } else if (inUse) {
     act.replaceChildren(el('button', { class: 'ghost', disabled: true }, iconEl('check'), 'In use'));
   } else if (installed) {
-    act.replaceChildren(el('button', { class: 'primary', onclick: () => useModel(m) }, 'Use'));
+    act.replaceChildren(el('button', { class: 'primary', onclick: () => useModel(m) }, m.ctxDetail ? `Use at ${formatContext(m.ctx)}` : 'Use'));
   } else {
     act.replaceChildren(el('button', {
       class: highlight ? 'primary' : 'ghost',
@@ -2792,7 +2891,7 @@ async function downloadModel(m) {
   state.tags = await api.ollamaTags();
   if (res.ok) {
     const entry = state.specs ? recommendModels(state.specs).models.find((x) => x.id === m.id) : null;
-    const target = entry || m;
+    const target = m.ctx ? m : entry || m;
     toast({
       key: `pull-${m.id}`,
       icon: 'check',
@@ -2937,6 +3036,12 @@ function bindUi() {
   $('#act-settings').onclick = openSettings;
   $('#btn-model').onclick = (e) => showModelMenu(e.currentTarget);
   $('#s-find-models').onclick = openModels;
+  $$('#m-mode button').forEach((b) => {
+    b.onclick = () => {
+      state.modelsMode = b.dataset.mode;
+      renderModels();
+    };
+  });
   $('#m-close').onclick = () => $('#models-modal').classList.add('hidden');
   $('#models-modal').onmousedown = (e) => {
     if (e.target.id === 'models-modal') $('#models-modal').classList.add('hidden');

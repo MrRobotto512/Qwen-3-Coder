@@ -20,6 +20,14 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - Downloads models through Ollama inside the app, with progress.
 
   Open it from the model menu (top right) or **Settings → Find models**.
+- **Long context with YaRN:**
+  - Most Qwen models are trained on 32K tokens. YaRN stretches their position encoding to read up to 128K.
+  - Ollama can't turn YaRN on by itself, so the **Long context (YaRN)** tab in **Models for this PC** offers builds with YaRN built in (Unsloth's 128K GGUFs on Hugging Face), downloaded through Ollama.
+  - For each model, it plans the largest context that fits this PC's memory and sets it when you click **Use**.
+  - Qwen3-Coder 30B is natively 256K, so it just gets a bigger context window, with no YaRN build needed.
+  - The app warns when the context window is set beyond what the current model handles, and suggests a YaRN build when a conversation is running out of room.
+
+  Qwen notes YaRN can slightly lower quality on short prompts. Use these builds for big tasks and keep a standard model for everyday work.
 - **Built-in updates:** the app checks GitHub Releases on startup and every 6 hours.
   - The **installed** version downloads the update in the background and installs it on restart.
   - The **portable** .exe and the zip open the download page instead.
@@ -72,7 +80,7 @@ The app talks to Ollama's own API and sets the context window itself (32,768 tok
 
 ### Option B: LM Studio
 
-Download a Qwen2.5-Coder or Qwen3-Coder model, then start the local server from the **Developer** tab (port 1234).
+Download a Qwen2.5-Coder or Qwen3-Coder model, then start the local server from the **Developer** tab (port 1234). For long context, download one of Unsloth's "128K" GGUFs (search for, say, `Qwen2.5-Coder-14B-Instruct-128K`). They have YaRN built in; raise the context length when loading the model.
 
 ### Option C: Cloud API
 

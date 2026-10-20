@@ -488,3 +488,9 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .running-pill.warn { background: var(--yellow-bg); color: var(--yellow); }
 .running-pill .spinner { width: 10px; height: 10px; }
 .recent-link { margin-top: 14px; color: var(--text-2); font-size: 12px; }
+
+/* ---------- long context ---------- */
+.m-mode { align-self: flex-start; }
+.m-mode button { padding: 4px 14px; font-size: 12.5px; }
+.tagb.yarn { background: rgba(88, 166, 255, .15); color: #79c0ff; }
+.m-facts .ctx-detail { color: var(--text-3); }

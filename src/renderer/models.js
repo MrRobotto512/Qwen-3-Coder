@@ -3,18 +3,21 @@
 // Qwen models available through Ollama, with the download size of the default 4-bit build and
 // the approximate memory each token of context costs (KV cache, fp16). Rank orders them by how
 // well they work as a coding agent.
+// nativeCtx is the context the model was trained for. Past it, the model needs YaRN (RoPE
+// scaling), which Ollama can't switch on by itself, so `yarn.repo` names a Hugging Face GGUF
+// build with the YaRN settings baked in (Unsloth's "128K" builds) that Ollama can pull directly.
 const MODEL_CATALOG = [
-  { id: 'qwen3-coder:30b', name: 'Qwen3-Coder 30B', sizeGB: 19, kvKB: 96, moe: true, rank: 10, agent: 'Excellent', note: 'Best local coding agent. A mixture-of-experts model with only 3B parameters active per token, so it stays usable even when part of it runs on the CPU.' },
-  { id: 'qwen2.5-coder:32b', name: 'Qwen2.5-Coder 32B', sizeGB: 20, kvKB: 256, rank: 9, agent: 'Very good', note: 'Strong coder, but every token uses all 32B parameters, so it needs a big GPU to be quick.' },
-  { id: 'qwen3:32b', name: 'Qwen3 32B', sizeGB: 20, kvKB: 256, rank: 8, agent: 'Very good', note: 'General model with strong reasoning; good at planning multi-step changes.' },
-  { id: 'qwen3:30b', name: 'Qwen3 30B', sizeGB: 19, kvKB: 96, moe: true, rank: 7.5, agent: 'Very good', note: 'General mixture-of-experts model; fast for its size, like Qwen3-Coder 30B.' },
-  { id: 'qwen2.5-coder:14b', name: 'Qwen2.5-Coder 14B', sizeGB: 9, kvKB: 192, rank: 6.5, agent: 'Good', note: 'Good balance of quality and speed on 12–16 GB GPUs.' },
-  { id: 'qwen3:14b', name: 'Qwen3 14B', sizeGB: 9.3, kvKB: 160, rank: 6, agent: 'Good', note: 'General model; good tool use for its size.' },
-  { id: 'qwen2.5-coder:7b', name: 'Qwen2.5-Coder 7B', sizeGB: 4.7, kvKB: 56, rank: 4.5, agent: 'Fair', note: 'Fine for explanations and small edits; can lose track on long agent tasks.' },
-  { id: 'qwen3:8b', name: 'Qwen3 8B', sizeGB: 5.2, kvKB: 144, rank: 4, agent: 'Fair', note: 'General model; decent tool use for small tasks.' },
-  { id: 'qwen3:4b', name: 'Qwen3 4B', sizeGB: 2.5, kvKB: 144, rank: 2, agent: 'Basic', note: 'For low-memory machines. Use Chat mode for anything complex.' },
-  { id: 'qwen2.5-coder:3b', name: 'Qwen2.5-Coder 3B', sizeGB: 1.9, kvKB: 36, rank: 1, agent: 'Weak', note: 'Autocomplete-sized; not reliable in Agent mode.' },
-  { id: 'qwen2.5-coder:1.5b', name: 'Qwen2.5-Coder 1.5B', sizeGB: 1, kvKB: 28, rank: 0, agent: 'Weak', note: 'Very small; quick answers only.' }
+  { id: 'qwen3-coder:30b', name: 'Qwen3-Coder 30B', sizeGB: 19, kvKB: 96, moe: true, rank: 10, agent: 'Excellent', note: 'Best local coding agent. A mixture-of-experts model with only 3B parameters active per token, so it stays usable even when part of it runs on the CPU.', nativeCtx: 262144, yarn: { repo: 'unsloth/Qwen3-Coder-30B-A3B-Instruct-1M-GGUF', maxCtx: 1048576 } },
+  { id: 'qwen2.5-coder:32b', name: 'Qwen2.5-Coder 32B', sizeGB: 20, kvKB: 256, rank: 9, agent: 'Very good', note: 'Strong coder, but every token uses all 32B parameters, so it needs a big GPU to be quick.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen2.5-Coder-32B-Instruct-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen3:32b', name: 'Qwen3 32B', sizeGB: 20, kvKB: 256, rank: 8, agent: 'Very good', note: 'General model with strong reasoning; good at planning multi-step changes.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen3-32B-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen3:30b', name: 'Qwen3 30B', sizeGB: 19, kvKB: 96, moe: true, rank: 7.5, agent: 'Very good', note: 'General mixture-of-experts model; fast for its size, like Qwen3-Coder 30B.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen3-30B-A3B-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen2.5-coder:14b', name: 'Qwen2.5-Coder 14B', sizeGB: 9, kvKB: 192, rank: 6.5, agent: 'Good', note: 'Good balance of quality and speed on 12–16 GB GPUs.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen2.5-Coder-14B-Instruct-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen3:14b', name: 'Qwen3 14B', sizeGB: 9.3, kvKB: 160, rank: 6, agent: 'Good', note: 'General model; good tool use for its size.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen3-14B-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen2.5-coder:7b', name: 'Qwen2.5-Coder 7B', sizeGB: 4.7, kvKB: 56, rank: 4.5, agent: 'Fair', note: 'Fine for explanations and small edits; can lose track on long agent tasks.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen2.5-Coder-7B-Instruct-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen3:8b', name: 'Qwen3 8B', sizeGB: 5.2, kvKB: 144, rank: 4, agent: 'Fair', note: 'General model; decent tool use for small tasks.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen3-8B-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen3:4b', name: 'Qwen3 4B', sizeGB: 2.5, kvKB: 144, rank: 2, agent: 'Basic', note: 'For low-memory machines. Use Chat mode for anything complex.', nativeCtx: 32768, yarn: { repo: 'unsloth/Qwen3-4B-128K-GGUF', maxCtx: 131072 } },
+  { id: 'qwen2.5-coder:3b', name: 'Qwen2.5-Coder 3B', sizeGB: 1.9, kvKB: 36, rank: 1, agent: 'Weak', note: 'Autocomplete-sized; not reliable in Agent mode.', nativeCtx: 32768 },
+  { id: 'qwen2.5-coder:1.5b', name: 'Qwen2.5-Coder 1.5B', sizeGB: 1, kvKB: 28, rank: 0, agent: 'Weak', note: 'Very small; quick answers only.', nativeCtx: 32768 }
 ];
 
 const CONTEXT_STEPS = [32768, 24576, 16384, 12288, 8192];
@@ -69,6 +72,36 @@ function recommendModels(specs) {
   return { models, recommended, stronger };
 }
 
+const LONG_CONTEXT_STEPS = [1048576, 524288, 262144, 196608, 131072, 98304, 65536, 49152];
+
+// The largest context beyond 32K this model can hold on this machine, preferring a size that
+// keeps everything on the GPU. needsYarn says whether that needs the YaRN build.
+function planLongContext(model, specs) {
+  const maxCtx = Math.max(model.nativeCtx, model.yarn?.maxCtx || 0);
+  if (maxCtx <= 32768) return null;
+  const plan = (ctx, fit) => ({ ...model, fit, ctx, maxCtx, needGB: memoryNeededGB(model, ctx), needsYarn: ctx > model.nativeCtx });
+  const steps = LONG_CONTEXT_STEPS.filter((ctx) => ctx <= maxCtx);
+  // Largest size that stays on the GPU...
+  for (const ctx of steps) if (fitAt(model, specs, ctx) === 'gpu') return plan(ctx, 'gpu');
+  // ...otherwise the smallest useful one, since every token that spills to the CPU slows it down.
+  for (const ctx of [...steps].reverse()) if (ctx >= 65536 && fitAt(model, specs, ctx) === 'mixed') return plan(ctx, 'mixed');
+  return plan(65536, fitAt(model, specs, 65536));
+}
+
+function recommendLongContext(specs) {
+  const models = MODEL_CATALOG.map((m) => planLongContext(m, specs)).filter(Boolean);
+  const byRank = [...models].sort((a, b) => b.rank - a.rank);
+  const recommended =
+    byRank.find((m) => m.fit === 'gpu' && m.ctx >= 65536) || byRank.find((m) => m.fit === 'gpu') || byRank.find((m) => m.fit === 'mixed') || null;
+  return { models, recommended };
+}
+
+// Finds the catalog entry for an Ollama model id, including the hf.co YaRN builds.
+function catalogEntryFor(id) {
+  const lower = String(id || '').toLowerCase();
+  return MODEL_CATALOG.find((m) => m.id === lower || (m.yarn && lower.startsWith(`hf.co/${m.yarn.repo.toLowerCase()}:`)));
+}
+
 function describeSpecs(specs) {
   const parts = [];
   if (specs.gpu) parts.push(`${specs.gpu.name} · ${formatGB(specs.gpu.vramGB)}${specs.gpu.unified ? ' usable (shared)' : ' VRAM'}`);
@@ -83,5 +116,5 @@ function formatGB(gb) {
 }
 
 function formatContext(ctx) {
-  return `${Math.round(ctx / 1024)}K`;
+  return ctx >= 1048576 ? `${+(ctx / 1048576).toFixed(1)}M` : `${Math.round(ctx / 1024)}K`;
 }

@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('api', {
   ollamaTags: () => ipcRenderer.invoke('ollama:tags'),
   ollamaPull: (model) => ipcRenderer.invoke('ollama:pull', model),
   ollamaPullCancel: (model) => ipcRenderer.invoke('ollama:pull-cancel', model),
+  ollamaShow: (model) => ipcRenderer.invoke('ollama:show', model),
+  hfResolve: (repo) => ipcRenderer.invoke('hf:resolve', repo),
   onPullProgress: (cb) => {
     const fn = (_e, p) => cb(p);
     ipcRenderer.on('ollama:pull-progress', fn);
