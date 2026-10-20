@@ -19,10 +19,14 @@ const DEFAULT_SETTINGS = {
   model: 'qwen2.5-coder:7b',
   temperature: 0.2,
   agentMode: true,
-  autoApproveEdits: false,
-  autoApproveCommands: false,
+  // 'ask': approve every edit and command; 'edits': edits apply automatically, commands ask
+  // (unless allow-listed); 'auto': nothing asks except destructive commands.
+  approvalMode: 'edits',
+  allowedCommands: [],
   includeCurrentFile: true,
+  followAgent: true,
   contextLength: 32768,
+  recentWorkspaces: [],
   lastWorkspace: null,
   fontSize: 14
 };
@@ -37,7 +41,12 @@ function settingsPath() {
 }
 function loadSettings() {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) };
+    const saved = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
+    // Migrate the old on/off approval checkboxes.
+    if (!saved.approvalMode && saved.autoApproveCommands) saved.approvalMode = 'auto';
+    delete saved.autoApproveEdits;
+    delete saved.autoApproveCommands;
+    return { ...DEFAULT_SETTINGS, ...saved };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -102,7 +111,7 @@ function createWindow() {
     height: 920,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#1e1e1e',
+    backgroundColor: '#121215',
     title: 'Qwen Workspace',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -177,6 +186,7 @@ ipcMain.handle('workspace:set', async (_e, dir) => {
   workspaceRoot = path.resolve(dir);
   const s = loadSettings();
   s.lastWorkspace = workspaceRoot;
+  s.recentWorkspaces = [workspaceRoot, ...(s.recentWorkspaces || []).filter((p) => p !== workspaceRoot)].slice(0, 8);
   saveSettings(s);
   mainWindow.setTitle(`${path.basename(workspaceRoot)} — Qwen Workspace`);
   return { root: workspaceRoot, name: path.basename(workspaceRoot), sep: path.sep, platform: process.platform };
@@ -230,18 +240,22 @@ ipcMain.handle('fs:mkdir', async (_e, rel) => {
   return true;
 });
 
-ipcMain.handle('fs:delete', async (_e, rel) => {
+// `quiet` skips the confirmation; the renderer uses it only when reverting a file Qwen created,
+// after the user has already confirmed the revert.
+ipcMain.handle('fs:delete', async (_e, rel, opts = {}) => {
   const abs = resolveInWorkspace(rel);
   if (abs === workspaceRoot) throw new Error('Refusing to delete the workspace root.');
-  const { response } = await dialog.showMessageBox(mainWindow, {
-    type: 'warning',
-    buttons: ['Delete', 'Cancel'],
-    defaultId: 1,
-    cancelId: 1,
-    message: `Delete "${rel}"?`,
-    detail: 'This cannot be undone.'
-  });
-  if (response !== 0) return false;
+  if (!opts.quiet) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Delete', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: `Delete "${rel}"?`,
+      detail: 'This cannot be undone.'
+    });
+    if (response !== 0) return false;
+  }
   await fsp.rm(abs, { recursive: true, force: true });
   return true;
 });

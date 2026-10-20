@@ -13,7 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   exists: (rel) => ipcRenderer.invoke('fs:exists', rel),
   write: (rel, content) => ipcRenderer.invoke('fs:write', rel, content),
   mkdir: (rel) => ipcRenderer.invoke('fs:mkdir', rel),
-  remove: (rel) => ipcRenderer.invoke('fs:delete', rel),
+  remove: (rel, opts) => ipcRenderer.invoke('fs:delete', rel, opts),
   search: (query, opts) => ipcRenderer.invoke('fs:search', query, opts),
   reveal: (rel) => ipcRenderer.invoke('shell:reveal', rel),
 

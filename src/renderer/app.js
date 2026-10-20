@@ -1,8 +1,24 @@
-/* global monaco, marked, DOMPurify, require, api */
+/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge */
 'use strict';
 
-const $ = (sel) => document.querySelector(sel);
 // `api` is the bridge exposed by preload.js (window.api).
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'class') node.className = v;
+    else if (k === 'text') node.textContent = v;
+    else if (k === 'html') node.innerHTML = v;
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (k === 'dataset') Object.assign(node.dataset, v);
+    else node.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) node.append(c);
+  return node;
+}
 
 const PROVIDERS = {
   ollama: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b' },
@@ -11,80 +27,157 @@ const PROVIDERS = {
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-coder' },
   custom: { baseUrl: '', model: '' }
 };
-const MAX_AGENT_STEPS = 30;
+const APPROVAL_MODES = {
+  ask: { label: 'Ask', icon: 'shield', desc: 'Approve every file edit and command.' },
+  edits: { label: 'Auto-edit', icon: 'shieldCheck', desc: 'Edits apply right away (revert them from Changes). Commands ask unless always-allowed.' },
+  auto: { label: 'Full auto', icon: 'zap', desc: 'Edits and commands run without asking. Destructive commands still ask.' }
+};
+// Commands that always need approval, whatever the mode.
+const DANGEROUS_COMMAND = /\b(rm\s+-[a-z]*[rf]|rmdir|rd\s+\/s|del\s|erase\s|format\s|mkfs|shutdown|reboot|reg\s+delete|remove-item|git\s+(push|reset\s+--hard|clean|checkout\s+--|branch\s+-D)|npm\s+publish|diskpart|bcdedit|takeown|icacls)\b/i;
+const MAX_AGENT_STEPS = 40;
 const MAX_TOOL_RESULT = 24_000;
 const MAX_ATTACH = 60_000;
 
 const state = {
   settings: null,
   ws: null, // { root, name, sep, platform }
-  tabs: [], // { path, model, savedVersion, viewState }
+  tabs: [], // { path, model, savedVersion, viewState, preview, decoIds }
   active: null,
   selectedDir: '.',
   expanded: new Set(['.']),
+  view: 'explorer',
   history: [], // OpenAI-format messages (without the system prompt)
   busy: false,
   stopRequested: false,
   currentChatId: null,
-  attachCurrent: true
+  attachCurrent: true,
+  changes: new Map(), // path -> { original: string|null, added, removed }
+  notes: [], // things to tell Qwen with the next message (e.g. reverts)
+  review: null, // { path, original, modified, pending, visible, title }
+  pendingApproval: null, // { finish(bool), cancelOnClose }
+  lastUsage: null,
+  fileIndex: null,
+  searchRegex: false,
+  quick: { mode: 'open', items: [], sel: 0 }
 };
 
 let editor;
-let diffEditor;
+let reviewEditor;
+let reviewSideBySide = true;
+const extraAttachments = new Set();
 
 // ===================================================================
 // Boot
 // ===================================================================
 require.config({ paths: { vs: '../../node_modules/monaco-editor/min/vs' } });
 require(['vs/editor/editor.main'], async () => {
+  hydrateIcons(document);
   state.settings = await api.getSettings();
   state.attachCurrent = state.settings.includeCurrentFile;
 
+  monaco.editor.defineTheme('qwen-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [],
+    colors: {
+      'editor.background': '#18181c',
+      'editorGutter.background': '#18181c',
+      'minimap.background': '#18181c',
+      'editor.lineHighlightBackground': '#ffffff08',
+      'editor.lineHighlightBorder': '#00000000',
+      'editorLineNumber.foreground': '#4f4f5a',
+      'editorLineNumber.activeForeground': '#c8c8d0',
+      'editor.selectionBackground': '#8b6cff40',
+      'editor.inactiveSelectionBackground': '#8b6cff22',
+      'editorIndentGuide.background': '#26262d',
+      'editorCursor.foreground': '#a892ff',
+      'editorWidget.background': '#1d1d22',
+      'editorWidget.border': '#3a3a44',
+      'scrollbarSlider.background': '#ffffff12',
+      'scrollbarSlider.hoverBackground': '#ffffff22',
+      'diffEditor.insertedLineBackground': '#3fb9501c',
+      'diffEditor.removedLineBackground': '#f470671c',
+      'diffEditor.insertedTextBackground': '#3fb95033',
+      'diffEditor.removedTextBackground': '#f4706733'
+    }
+  });
+
   editor = monaco.editor.create($('#editor'), {
-    theme: 'vs-dark',
+    theme: 'qwen-dark',
     automaticLayout: true,
     fontSize: state.settings.fontSize,
     fontFamily: "'Cascadia Code', Consolas, 'Courier New', monospace",
-    minimap: { enabled: true },
+    fontLigatures: true,
+    minimap: { enabled: true, renderCharacters: false, scale: 1 },
     scrollBeyondLastLine: false,
+    smoothScrolling: true,
+    cursorSmoothCaretAnimation: 'on',
     renderWhitespace: 'selection',
+    padding: { top: 10 },
     tabSize: 2
   });
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, saveActive);
-  editor.onDidChangeCursorSelection(renderChips);
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, () => openQuick('open'));
+  editor.onDidChangeCursorSelection(() => {
+    renderChips();
+    renderCursor();
+  });
+  editor.onDidChangeModel(renderCursor);
 
   bindUi();
-  applySettingsToUi();
   initSplitters();
+  restoreLayout();
+  applySettingsToUi();
   checkConnection();
 
-  if (state.settings.lastWorkspace) {
-    await openWorkspace(state.settings.lastWorkspace, true);
-  }
-  renderWelcome();
+  if (state.settings.lastWorkspace) await openWorkspace(state.settings.lastWorkspace, true);
+  renderAll();
 });
 
+function hydrateIcons(root) {
+  root.querySelectorAll('[data-icon]').forEach((s) => {
+    s.innerHTML = icon(s.dataset.icon);
+    s.classList.add('ico');
+  });
+}
+
+function renderAll() {
+  renderTree();
+  renderTabs();
+  renderCenter();
+  renderChanges();
+  renderChips();
+  renderStatusbar();
+  if (!state.history.length) renderChatEmpty();
+}
+
 // ===================================================================
-// Workspace & file tree
+// Workspace
 // ===================================================================
 async function openWorkspace(dir, silent) {
+  if (state.busy) stopChat();
   const ws = await api.setWorkspace(dir);
   if (!ws) {
     if (!silent) alert(`Could not open folder:\n${dir}`);
     return;
   }
   for (const t of state.tabs) t.model.dispose();
-  state.tabs = [];
-  state.active = null;
-  state.ws = ws;
-  state.expanded = new Set(['.']);
-  state.selectedDir = '.';
-  $('#ws-name').textContent = ws.root;
-  $('#term-shell').textContent = ws.platform === 'win32' ? '(cmd.exe)' : '(sh)';
+  Object.assign(state, {
+    tabs: [],
+    active: null,
+    ws,
+    expanded: new Set(['.']),
+    selectedDir: '.',
+    fileIndex: null,
+    notes: []
+  });
+  state.changes.clear();
+  closeReview(true);
+  state.settings = await api.getSettings();
+  $('#term-shell').textContent = ws.platform === 'win32' ? '· cmd.exe' : '· sh';
+  $('#term-out').innerHTML = '';
   newChat();
-  renderTabs();
-  await renderTree();
-  renderWelcome();
+  renderAll();
 }
 
 async function pickWorkspace() {
@@ -92,28 +185,34 @@ async function pickWorkspace() {
   if (dir) await openWorkspace(dir);
 }
 
-function renderWelcome() {
-  const show = !state.active;
-  $('#welcome').classList.toggle('hidden', !show);
-  const recent = $('#welcome-recent');
-  recent.innerHTML = '';
-  if (state.ws) {
-    recent.textContent = `Project: ${state.ws.name} — pick a file from the explorer or ask Qwen.`;
-  } else if (state.settings?.lastWorkspace) {
-    const b = document.createElement('button');
-    b.textContent = `Reopen ${state.settings.lastWorkspace}`;
-    b.onclick = () => openWorkspace(state.settings.lastWorkspace);
-    recent.append(b);
-  }
+function requireWorkspace() {
+  if (state.ws) return true;
+  pickWorkspace();
+  return false;
 }
 
+function showFolderMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const recent = (state.settings.recentWorkspaces || []).filter((p) => p !== state.ws?.root);
+  const items = [{ label: 'Open Folder…', icon: 'folderOpen', detail: 'Ctrl+O', onClick: pickWorkspace }];
+  if (recent.length) items.push('-');
+  for (const p of recent) items.push({ label: baseName(p), detail: p, icon: 'history', onClick: () => openWorkspace(p) });
+  showMenu(r.left, r.bottom + 4, items);
+}
+
+// ===================================================================
+// Explorer
+// ===================================================================
 async function renderTree() {
   const tree = $('#tree');
+  $('#explorer-title').textContent = state.ws ? state.ws.name : 'Explorer';
   if (!state.ws) {
-    tree.innerHTML = '<div class="tree-empty">No folder open.</div>';
+    tree.replaceChildren(
+      el('div', { class: 'empty-note' }, 'No folder open.', el('br'), el('button', { class: 'primary', onclick: pickWorkspace }, iconEl('folderOpen'), 'Open Folder'))
+    );
     return;
   }
-  const ul = document.createElement('ul');
+  const ul = el('ul');
   await fillDir(ul, '.', 0);
   tree.replaceChildren(ul);
 }
@@ -123,39 +222,44 @@ async function fillDir(ul, dirPath, depth) {
   try {
     entries = await api.list(dirPath);
   } catch (e) {
-    ul.innerHTML = `<li class="tree-empty">${escapeHtml(e.message)}</li>`;
+    ul.replaceChildren(el('li', { class: 'empty-note', text: e.message }));
     return;
   }
   for (const entry of entries) {
-    const li = document.createElement('li');
-    const row = document.createElement('div');
-    row.className = 'node';
-    row.style.paddingLeft = `${8 + depth * 12}px`;
-    row.dataset.path = entry.path;
     const open = entry.dir && state.expanded.has(entry.path);
-    row.innerHTML = `<span class="twisty">${entry.dir ? (open ? '▾' : '▸') : ''}</span><span class="icon">${entry.dir ? '📁' : fileIcon(entry.name)}</span><span class="label"></span>`;
-    row.querySelector('.label').textContent = entry.name;
-    if (!entry.dir && entry.path === state.active) row.classList.add('active');
-    if (entry.dir && entry.path === state.selectedDir) row.classList.add('selected');
-    li.append(row);
-
+    const ch = state.changes.get(entry.path);
+    const row = el(
+      'div',
+      {
+        class: `node${open ? ' open' : ''}${entry.path === state.active ? ' active' : ''}${entry.dir && entry.path === state.selectedDir ? ' selected' : ''}${ch ? (ch.original === null ? ' added' : ' changed') : ''}`,
+        dataset: { path: entry.path },
+        style: `padding-left:${6 + depth * 12}px`,
+        title: entry.path
+      },
+      entry.dir ? iconEl('chevronRight', 'chev') : el('span', { class: 'chev' }),
+      entry.dir ? iconEl(open ? 'folderOpen' : 'folder', 'folder-ico') : fileBadge(entry.name),
+      el('span', { class: 'label', text: entry.name }),
+      ch ? el('span', { class: 'mark', text: ch.original === null ? 'A' : 'M' }) : null
+    );
+    const li = el('li', {}, row);
     if (entry.dir) {
-      const child = document.createElement('ul');
+      const child = el('ul');
       li.append(child);
       if (open) await fillDir(child, entry.path, depth + 1);
       row.onclick = async () => {
         state.selectedDir = entry.path;
-        document.querySelectorAll('.node.selected').forEach((n) => n.classList.remove('selected'));
+        $$('.node.selected').forEach((n) => n.classList.remove('selected'));
         row.classList.add('selected');
         if (state.expanded.has(entry.path)) {
           state.expanded.delete(entry.path);
-          child.innerHTML = '';
-          row.querySelector('.twisty').textContent = '▸';
+          child.replaceChildren();
+          row.classList.remove('open');
         } else {
           state.expanded.add(entry.path);
           await fillDir(child, entry.path, depth + 1);
-          row.querySelector('.twisty').textContent = '▾';
+          row.classList.add('open');
         }
+        row.querySelector('.folder-ico').innerHTML = icon(row.classList.contains('open') ? 'folderOpen' : 'folder');
       };
     } else {
       row.onclick = () => openFile(entry.path);
@@ -168,76 +272,51 @@ async function fillDir(ul, dirPath, depth) {
   }
 }
 
-function fileIcon(name) {
-  const ext = name.split('.').pop().toLowerCase();
-  const map = {
-    js: '🟨', mjs: '🟨', cjs: '🟨', ts: '🟦', tsx: '⚛', jsx: '⚛', py: '🐍', json: '🔧', md: '📝',
-    html: '🌐', css: '🎨', scss: '🎨', cs: '🟪', java: '☕', go: '🐹', rs: '🦀', cpp: '⚙', c: '⚙', h: '⚙',
-    sh: '💲', ps1: '💲', bat: '💲', yml: '🔧', yaml: '🔧', toml: '🔧', png: '🖼', jpg: '🖼', svg: '🖼', txt: '📄'
-  };
-  return map[ext] || '📄';
-}
-
 function showTreeMenu(ev, entry) {
   const items = [];
   if (!entry.dir) {
-    items.push(['Open', () => openFile(entry.path)]);
-    items.push(['Add to chat', () => addFileToChat(entry.path)]);
+    items.push({ label: 'Open', icon: 'file', onClick: () => openFile(entry.path) });
+    items.push({ label: 'Add to chat', icon: 'paperclip', onClick: () => addFileToChat(entry.path) });
+    items.push('-');
+  } else {
+    items.push({ label: 'Ask Qwen about this folder', icon: 'sparkles', onClick: () => setPrompt(`Explain what the ${entry.path}/ folder contains and how it fits into the project.`, true) });
+    items.push('-');
   }
   const base = entry.dir ? entry.path : parentDir(entry.path);
-  items.push(['New file here…', () => newFile(base)]);
-  items.push(['New folder here…', () => newFolder(base)]);
-  items.push(['Reveal in File Explorer', () => api.reveal(entry.path)]);
-  items.push(['Delete', async () => {
-    if (await api.remove(entry.path)) {
-      const tab = state.tabs.find((t) => t.path === entry.path);
-      if (tab) closeTab(tab.path, true);
-      renderTree();
+  items.push({ label: 'New file here…', icon: 'filePlus', onClick: () => newFile(base) });
+  items.push({ label: 'New folder here…', icon: 'folderPlus', onClick: () => newFolder(base) });
+  items.push({ label: 'Reveal in File Explorer', icon: 'external', onClick: () => api.reveal(entry.path) });
+  items.push('-');
+  items.push({
+    label: 'Delete',
+    icon: 'trash',
+    onClick: async () => {
+      if (await api.remove(entry.path)) {
+        if (findTab(entry.path)) closeTab(entry.path, true);
+        state.fileIndex = null;
+        renderTree();
+      }
     }
-  }]);
+  });
   showMenu(ev.clientX, ev.clientY, items);
-}
-
-function showMenu(x, y, items) {
-  const menu = $('#ctx-menu');
-  menu.innerHTML = '';
-  for (const [label, fn] of items) {
-    const d = document.createElement('div');
-    d.textContent = label;
-    d.onclick = () => {
-      menu.classList.add('hidden');
-      fn();
-    };
-    menu.append(d);
-  }
-  menu.style.left = `${Math.min(x, innerWidth - 190)}px`;
-  menu.style.top = `${Math.min(y, innerHeight - items.length * 28 - 10)}px`;
-  menu.classList.remove('hidden');
-}
-
-function parentDir(p) {
-  const i = p.lastIndexOf('/');
-  return i < 0 ? '.' : p.slice(0, i);
-}
-function joinPath(dir, name) {
-  return dir === '.' || !dir ? name : `${dir}/${name}`;
 }
 
 async function newFile(dir = state.selectedDir) {
   if (!requireWorkspace()) return;
-  const name = await askInput('New file name', 'e.g. src/utils.js');
+  const name = await askInput('New file', 'e.g. src/utils.js');
   if (!name) return;
   const p = joinPath(dir, name.replace(/\\/g, '/'));
   if (await api.exists(p)) return alert(`${p} already exists.`);
   await api.write(p, '');
   expandTo(p);
+  state.fileIndex = null;
   await renderTree();
   openFile(p);
 }
 
 async function newFolder(dir = state.selectedDir) {
   if (!requireWorkspace()) return;
-  const name = await askInput('New folder name', 'e.g. src/components');
+  const name = await askInput('New folder', 'e.g. src/components');
   if (!name) return;
   const p = joinPath(dir, name.replace(/\\/g, '/'));
   await api.mkdir(p);
@@ -250,55 +329,246 @@ function expandTo(p) {
   for (let i = 1; i < parts.length; i++) state.expanded.add(parts.slice(0, i).join('/'));
 }
 
-function requireWorkspace() {
-  if (state.ws) return true;
-  pickWorkspace();
-  return false;
+// ===================================================================
+// Side views
+// ===================================================================
+function showView(view, toggle) {
+  const side = $('#sidepanel');
+  if (toggle && state.view === view && !side.classList.contains('hidden')) {
+    side.classList.add('hidden');
+    $$('.act[data-view]').forEach((b) => b.classList.remove('active'));
+    saveLayout();
+    return;
+  }
+  state.view = view;
+  side.classList.remove('hidden');
+  $$('.act[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  $$('.view').forEach((v) => v.classList.toggle('hidden', v.id !== `view-${view}`));
+  if (view === 'search') setTimeout(() => $('#search-input').focus(), 0);
+  if (view === 'changes') renderChanges();
+  saveLayout();
+}
+
+let searchTimer = null;
+async function runSearch() {
+  const q = $('#search-input').value;
+  const out = $('#search-results');
+  const summary = $('#search-summary');
+  if (!q.trim() || !state.ws) {
+    out.replaceChildren();
+    summary.textContent = state.ws ? '' : 'Open a folder to search it.';
+    return;
+  }
+  summary.textContent = 'Searching…';
+  let hits;
+  try {
+    hits = await api.search(q, { regex: state.searchRegex, limit: 400 });
+  } catch (e) {
+    summary.textContent = e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+    return;
+  }
+  if (q !== $('#search-input').value) return; // a newer search is running
+  const byFile = new Map();
+  for (const h of hits) {
+    if (!byFile.has(h.path)) byFile.set(h.path, []);
+    byFile.get(h.path).push(h);
+  }
+  summary.textContent = hits.length ? `${hits.length}${hits.length >= 400 ? '+' : ''} results in ${byFile.size} files` : 'No results.';
+  const re = state.searchRegex ? safeRegex(q) : new RegExp(escapeRegex(q), 'ig');
+  const frag = document.createDocumentFragment();
+  for (const [path, list] of byFile) {
+    frag.append(
+      el('div', { class: 'sr-file', onclick: () => openFile(path, { line: list[0].line }), title: path },
+        fileBadge(baseName(path)), el('span', { text: baseName(path) }), el('span', { class: 'dir', text: parentDir(path) === '.' ? '' : parentDir(path) }),
+        el('span', { class: 'count', text: String(list.length) }))
+    );
+    for (const h of list) {
+      const line = el('div', { class: 'sr-line', onclick: () => openFile(path, { line: h.line }), title: h.text }, el('span', { class: 'ln', text: String(h.line) }));
+      const text = el('span');
+      if (re) {
+        let last = 0;
+        h.text.replace(re, (m, ...rest) => {
+          const idx = rest[rest.length - 2];
+          text.append(h.text.slice(last, idx), el('mark', { text: m }));
+          last = idx + m.length;
+          return m;
+        });
+        text.append(h.text.slice(last));
+      } else {
+        text.textContent = h.text;
+      }
+      line.append(text);
+      frag.append(line);
+    }
+  }
+  out.replaceChildren(frag);
+}
+
+function safeRegex(q) {
+  try {
+    return new RegExp(q, 'ig');
+  } catch {
+    return null;
+  }
+}
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ---------- changes made by Qwen ----------
+function recordChange(path, before, after) {
+  const prev = state.changes.get(path);
+  const original = prev ? prev.original : before;
+  if (original !== null && original === after) {
+    state.changes.delete(path);
+  } else {
+    state.changes.set(path, { original, ...diffStats(original ?? '', after) });
+  }
+  renderChanges();
+}
+
+function renderChanges() {
+  const n = state.changes.size;
+  const badge = $('#changes-badge');
+  badge.textContent = String(n);
+  badge.classList.toggle('hidden', !n);
+  $('#btn-revert-all').classList.toggle('hidden', !n);
+  const list = $('#changes-list');
+  if (!n) {
+    list.replaceChildren(el('div', { class: 'empty-note', text: 'Files Qwen creates or edits in this session show up here. Click one to see the diff, or revert it.' }));
+    return;
+  }
+  list.replaceChildren(...[...state.changes].map(([path, ch]) => changeItem(path, ch)));
+}
+
+function changeItem(path, ch) {
+  const st = ch.original === null ? 'A' : 'M';
+  return el(
+    'div',
+    { class: 'ch-item', title: path, onclick: () => openChangeReview(path) },
+    el('span', { class: `st ${st}`, text: st, title: st === 'A' ? 'Added' : 'Modified' }),
+    fileBadge(baseName(path)),
+    el('span', { class: 'name', text: baseName(path) }),
+    el('span', { class: 'dir', text: parentDir(path) === '.' ? '' : parentDir(path) }),
+    el('span', { class: 'stats', html: statsHtml(ch) }),
+    el('span', { class: 'acts' },
+      el('button', { class: 'icon-btn', title: 'Open file', onclick: (e) => { e.stopPropagation(); openFile(path); } }, iconEl('file')),
+      el('button', { class: 'icon-btn', title: 'Revert', onclick: (e) => { e.stopPropagation(); revertChange(path); } }, iconEl('undo')))
+  );
+}
+
+function statsHtml({ added, removed }) {
+  return `<span class="add">+${added}</span> <span class="del">−${removed}</span>`;
+}
+
+async function openChangeReview(path) {
+  const ch = state.changes.get(path);
+  if (!ch) return openFile(path);
+  let current = '';
+  try {
+    current = findTab(path)?.model.getValue() ?? (await api.read(path));
+  } catch {
+    /* deleted since */
+  }
+  openReview({ path, original: ch.original ?? '', modified: current, pending: false, title: `${ch.original === null ? 'Created' : 'Changed'} ${path}` });
+}
+
+async function revertChange(path, ask = true) {
+  const ch = state.changes.get(path);
+  if (!ch) return;
+  const what = ch.original === null ? `delete ${path} (Qwen created it)` : `restore ${path} to how it was before Qwen changed it`;
+  if (ask && !confirm(`Revert: ${what}?`)) return;
+  try {
+    if (ch.original === null) {
+      await api.remove(path, { quiet: true });
+      if (findTab(path)) closeTab(path, true);
+      state.fileIndex = null;
+    } else {
+      await api.write(path, ch.original);
+      syncOpenTab(path, ch.original);
+      clearHighlights(path);
+    }
+  } catch (e) {
+    alert(`Could not revert ${path}: ${e.message}`);
+    return;
+  }
+  state.changes.delete(path);
+  state.notes.push(`The user reverted your changes to ${path}${ch.original === null ? ' (the file was deleted)' : ''}.`);
+  if (state.review && !state.review.pending && state.review.path === path) closeReview(true);
+  renderChanges();
+  renderTree();
+  renderCenter();
+  flash(`Reverted ${path}`);
+}
+
+async function revertAll() {
+  const n = state.changes.size;
+  if (!n || !confirm(`Revert all ${n} files Qwen changed in this session?`)) return;
+  for (const path of [...state.changes.keys()]) await revertChange(path, false);
 }
 
 // ===================================================================
-// Editor tabs
+// Editor, tabs, review
 // ===================================================================
-async function openFile(path, { line } = {}) {
-  let tab = state.tabs.find((t) => t.path === path);
+function findTab(path) {
+  return state.tabs.find((t) => t.path === path);
+}
+
+async function openFile(path, { line, preview = false, focus = true } = {}) {
+  let tab = findTab(path);
   if (!tab) {
     let content;
     try {
       content = await api.read(path);
     } catch (e) {
-      alert(e.message);
-      return;
+      if (focus) alert(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''));
+      return false;
+    }
+    if (preview) {
+      const old = state.tabs.find((t) => t.preview && !isDirty(t));
+      if (old) closeTab(old.path, true, { keepActive: true });
     }
     const uri = monaco.Uri.file('/' + path);
     const model = monaco.editor.getModel(uri) || monaco.editor.createModel(content, undefined, uri);
     model.setValue(content);
-    tab = { path, model, savedVersion: model.getAlternativeVersionId(), viewState: null };
-    model.onDidChangeContent(() => renderTabs());
+    tab = { path, model, savedVersion: model.getAlternativeVersionId(), viewState: null, preview, decoIds: [] };
+    model.onDidChangeContent(() => {
+      if (!tab.syncing) {
+        tab.preview = false;
+        clearHighlights(path);
+      }
+      renderTabs();
+    });
     state.tabs.push(tab);
+  } else if (!preview) {
+    tab.preview = false;
   }
-  activateTab(path);
+  activateTab(path, { focus });
   if (line) {
     editor.revealLineInCenter(line);
     editor.setPosition({ lineNumber: line, column: 1 });
   }
+  return true;
 }
 
-function activateTab(path) {
-  const current = state.tabs.find((t) => t.path === state.active);
+function activateTab(path, { focus = true } = {}) {
+  const current = findTab(state.active);
   if (current) current.viewState = editor.saveViewState();
-  const tab = state.tabs.find((t) => t.path === path);
+  const tab = findTab(path);
   state.active = tab ? path : null;
+  if (state.review) state.review.visible = false;
   if (tab) {
     editor.setModel(tab.model);
     if (tab.viewState) editor.restoreViewState(tab.viewState);
-    editor.focus();
+    if (focus) editor.focus();
   } else {
     editor.setModel(null);
   }
-  document.querySelectorAll('.node').forEach((n) => n.classList.toggle('active', n.dataset.path === state.active));
+  $$('.node').forEach((n) => n.classList.toggle('active', n.dataset.path === state.active));
   renderTabs();
-  renderWelcome();
+  renderCenter();
   renderChips();
+  renderCursor();
 }
 
 function isDirty(tab) {
@@ -307,97 +577,268 @@ function isDirty(tab) {
 
 function renderTabs() {
   const bar = $('#tabs');
-  bar.innerHTML = '';
-  for (const tab of state.tabs) {
-    const el = document.createElement('div');
-    el.className = 'tab' + (tab.path === state.active ? ' active' : '') + (isDirty(tab) ? ' dirty' : '');
-    el.title = tab.path;
-    const name = document.createElement('span');
-    name.textContent = tab.path.split('/').pop();
-    const close = document.createElement('button');
-    close.className = 'close';
-    close.innerHTML = '<span>✕</span>';
-    close.onclick = (e) => {
-      e.stopPropagation();
-      closeTab(tab.path);
-    };
-    el.onmousedown = (e) => {
-      if (e.button === 1) closeTab(tab.path);
-    };
-    el.onclick = () => activateTab(tab.path);
-    el.append(name, close);
-    bar.append(el);
+  const nodes = state.tabs.map((tab) => {
+    const active = tab.path === state.active && !state.review?.visible;
+    return el(
+      'div',
+      {
+        class: `tab${active ? ' active' : ''}${isDirty(tab) ? ' dirty' : ''}${tab.preview ? ' preview' : ''}`,
+        title: tab.path,
+        onclick: () => activateTab(tab.path),
+        ondblclick: () => {
+          tab.preview = false;
+          renderTabs();
+        },
+        onmousedown: (e) => {
+          if (e.button === 1) closeTab(tab.path);
+        }
+      },
+      fileBadge(baseName(tab.path)),
+      el('span', { class: 'name', text: baseName(tab.path) }),
+      el('button', { class: 'close', title: 'Close (Ctrl+W)', onclick: (e) => { e.stopPropagation(); closeTab(tab.path); } }, iconEl('x'))
+    );
+  });
+  if (state.review) {
+    const r = state.review;
+    nodes.push(
+      el('div', { class: `tab review-tab${r.visible ? ' active' : ''}${r.pending ? ' pending' : ''}`, title: r.title, onclick: () => showReview() },
+        iconEl('changes'),
+        el('span', { class: 'name', text: `${r.pending ? 'Review' : 'Diff'}: ${baseName(r.path)}` }),
+        el('button', { class: 'close', title: 'Close', onclick: (e) => { e.stopPropagation(); closeReview(); } }, iconEl('x')))
+    );
   }
+  bar.replaceChildren(...nodes);
+  bar.querySelector('.tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
-function closeTab(path, force) {
+function closeTab(path, force, { keepActive } = {}) {
   const i = state.tabs.findIndex((t) => t.path === path);
   if (i < 0) return;
   const tab = state.tabs[i];
   if (!force && isDirty(tab) && !confirm(`${path} has unsaved changes. Close anyway?`)) return;
   state.tabs.splice(i, 1);
-  tab.model.dispose();
-  if (state.active === path) {
+  if (state.active === path && !keepActive) {
     const next = state.tabs[Math.min(i, state.tabs.length - 1)];
     activateTab(next ? next.path : null);
-  } else {
-    renderTabs();
+  } else if (state.active === path) {
+    state.active = null;
   }
+  tab.model.dispose();
+  renderTabs();
+  renderCenter();
 }
 
 async function saveActive() {
-  const tab = state.tabs.find((t) => t.path === state.active);
+  const tab = findTab(state.active);
   if (!tab) return;
   await api.write(tab.path, tab.model.getValue());
   tab.savedVersion = tab.model.getAlternativeVersionId();
+  tab.preview = false;
   renderTabs();
-  setStatus(`Saved ${tab.path}`);
+  flash(`Saved ${tab.path}`);
 }
 
 // Called after Qwen writes a file, so open tabs show the new content (undoable with Ctrl+Z).
 function syncOpenTab(path, content) {
-  const tab = state.tabs.find((t) => t.path === path);
+  const tab = findTab(path);
   if (!tab || tab.model.getValue() === content) return;
+  tab.syncing = true;
   tab.model.pushEditOperations([], [{ range: tab.model.getFullModelRange(), text: content }], () => null);
+  tab.syncing = false;
   tab.savedVersion = tab.model.getAlternativeVersionId();
   renderTabs();
 }
 
-// ===================================================================
-// Chat: context chips
-// ===================================================================
-const extraAttachments = new Set();
+// Marks the lines Qwen just added or changed, until the user edits the file.
+function highlightChanges(path, before, after) {
+  const tab = findTab(path);
+  if (!tab) return;
+  const ops = diffOps(before ?? '', after);
+  if (!ops) return;
+  const lineCount = tab.model.getLineCount();
+  const decos = [];
+  for (const [op, , , j] of ops) {
+    if (op === '+') {
+      decos.push({
+        range: new monaco.Range(j + 1, 1, j + 1, 1),
+        options: { isWholeLine: true, className: 'qw-added', linesDecorationsClassName: 'qw-gutter-add', overviewRuler: { color: '#3fb950', position: monaco.editor.OverviewRulerLane.Left } }
+      });
+    } else if (op === '-') {
+      const line = Math.max(1, Math.min(j + 1, lineCount));
+      decos.push({ range: new monaco.Range(line, 1, line, 1), options: { linesDecorationsClassName: 'qw-gutter-del', overviewRuler: { color: '#f47067', position: monaco.editor.OverviewRulerLane.Left } } });
+    }
+  }
+  tab.decoIds = tab.model.deltaDecorations(tab.decoIds || [], decos);
+  const first = decos[0]?.range.startLineNumber;
+  if (first && state.active === path) editor.revealLineInCenterIfOutsideViewport(first);
+}
 
+function clearHighlights(path) {
+  const tab = findTab(path);
+  if (tab?.decoIds?.length) tab.decoIds = tab.model.deltaDecorations(tab.decoIds, []);
+}
+
+function languageForPath(path) {
+  const ext = '.' + path.split('.').pop().toLowerCase();
+  const name = baseName(path).toLowerCase();
+  return monaco.languages.getLanguages().find((l) => l.extensions?.includes(ext) || l.filenames?.map((f) => f.toLowerCase()).includes(name))?.id || 'plaintext';
+}
+
+function openReview({ path, original, modified, pending, title }) {
+  if (!reviewEditor) {
+    reviewEditor = monaco.editor.createDiffEditor($('#review-editor'), {
+      theme: 'qwen-dark',
+      automaticLayout: true,
+      readOnly: true,
+      originalEditable: false,
+      renderSideBySide: reviewSideBySide,
+      useInlineViewWhenSpaceIsLimited: true,
+      renderOverviewRuler: true,
+      scrollBeyondLastLine: false,
+      minimap: { enabled: false },
+      fontSize: Number(state.settings.fontSize) || 14,
+      fontFamily: "'Cascadia Code', Consolas, 'Courier New', monospace",
+      hideUnchangedRegions: { enabled: true }
+    });
+  }
+  const old = reviewEditor.getModel();
+  const lang = languageForPath(path);
+  const stamp = Date.now();
+  reviewEditor.setModel({
+    original: monaco.editor.createModel(original ?? '', lang, monaco.Uri.parse(`review-a:/${stamp}/${path}`)),
+    modified: monaco.editor.createModel(modified, lang, monaco.Uri.parse(`review-b:/${stamp}/${path}`))
+  });
+  old?.original.dispose();
+  old?.modified.dispose();
+
+  state.review = { path, original, modified, pending, visible: true, title: title || path };
+  $('#review-title').textContent = state.review.title;
+  $('#review-stats').innerHTML = statsHtml(diffStats(original ?? '', modified));
+  $('.review-bar').classList.toggle('pending', !!pending);
+  const actions = $('#review-actions');
+  if (pending) {
+    actions.replaceChildren(
+      el('button', { class: 'ghost danger-text', onclick: () => state.pendingApproval?.finish(false) }, 'Reject'),
+      el('button', { class: 'primary', onclick: () => state.pendingApproval?.finish(true) }, iconEl('check'), 'Approve')
+    );
+  } else {
+    actions.replaceChildren(
+      el('button', { class: 'ghost', onclick: () => openFile(path) }, iconEl('file'), 'Open file'),
+      state.changes.has(path) ? el('button', { class: 'ghost', onclick: () => revertChange(path) }, iconEl('undo'), 'Revert') : null
+    );
+  }
+  renderTabs();
+  renderCenter();
+}
+
+function showReview() {
+  if (!state.review) return;
+  state.review.visible = true;
+  renderTabs();
+  renderCenter();
+}
+
+function closeReview(force) {
+  if (!state.review) return;
+  if (!force && state.review.pending && state.pendingApproval?.cancelOnClose) {
+    state.pendingApproval.finish(false);
+    return;
+  }
+  state.review = null;
+  renderTabs();
+  renderCenter();
+}
+
+function renderCenter() {
+  const showRev = !!state.review?.visible;
+  $('#review').classList.toggle('hidden', !showRev);
+  $('#editor').classList.toggle('hidden', showRev || !state.active);
+  $('#home').classList.toggle('hidden', showRev || !!state.active);
+  if (!showRev && !state.active) renderHome();
+}
+
+// ===================================================================
+// Home screen (shown when no file is open)
+// ===================================================================
+const QUICK_ACTIONS = [
+  { icon: 'book', title: 'Explain this project', desc: 'What it does, how it is organised and how to build it.', prompt: 'Give me an overview of this project: what it does, how it is structured, and how to build and run it.' },
+  { icon: 'bug', title: 'Find bugs', desc: 'Review the code for likely bugs and risky spots.', prompt: 'Look through the main source files for likely bugs or risky code, and list the most important ones with file and line.' },
+  { icon: 'wand', title: 'Add a feature', desc: 'Describe what you want and let Qwen build it.', prompt: 'Add this feature: ', fill: true },
+  { icon: 'play', title: 'Build & run', desc: 'Work out the build steps and run them.', prompt: 'Figure out how to build this project on this machine, then build it and fix any errors.' }
+];
+
+function renderHome() {
+  const home = $('#home');
+  const inner = el('div', { class: 'home-inner' });
+  if (!state.ws) {
+    const recent = state.settings?.recentWorkspaces || [];
+    inner.append(
+      el('div', { class: 'hero' },
+        el('span', { class: 'logo', text: 'Q' }),
+        el('h1', { text: 'Qwen Workspace' }),
+        el('p', { text: 'Open a project folder, then ask Qwen to build, fix or explain your code.' }),
+        el('button', { class: 'primary', onclick: pickWorkspace }, iconEl('folderOpen'), 'Open Folder'))
+    );
+    if (recent.length) {
+      inner.append(
+        el('div', { class: 'home-section' }, el('h3', { text: 'Recent' }),
+          ...recent.map((p) => el('button', { class: 'recent-item', onclick: () => openWorkspace(p), title: p },
+            iconEl('folder'), el('span', { class: 'name', text: baseName(p) }), el('span', { class: 'path', text: p }))))
+      );
+    }
+  } else {
+    inner.append(
+      el('div', { class: 'proj-head' },
+        el('div', { class: 'big-ico' }, iconEl('folder')),
+        el('div', {}, el('h1', { text: state.ws.name }), el('div', { class: 'path', text: state.ws.root }))),
+      el('div', { class: 'home-section' }, el('h3', { text: 'Ask Qwen' }),
+        el('div', { class: 'actions-grid' },
+          ...QUICK_ACTIONS.map((a) => el('button', { class: 'action-card', onclick: () => setPrompt(a.prompt, !a.fill) },
+            iconEl(a.icon), el('span', { class: 't', text: a.title }), el('span', { class: 'd', text: a.desc })))))
+    );
+    if (state.changes.size) {
+      inner.append(el('div', { class: 'home-section' }, el('h3', { text: `Changed by Qwen (${state.changes.size})` }),
+        ...[...state.changes].map(([p, ch]) => changeItem(p, ch))));
+    }
+    inner.append(
+      el('div', { class: 'home-tips' },
+        el('span', { html: '<kbd>Ctrl</kbd> <kbd>P</kbd> go to file' }),
+        el('span', { html: '<kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>F</kbd> search' }),
+        el('span', { html: '<kbd>Ctrl</kbd> <kbd>`</kbd> terminal' }),
+        el('span', { html: '<kbd>Ctrl</kbd> <kbd>L</kbd> chat' }))
+    );
+  }
+  home.replaceChildren(inner);
+}
+
+// ===================================================================
+// Chat: attachments
+// ===================================================================
 function renderChips() {
   const box = $('#context-chips');
-  box.innerHTML = '';
+  const chips = [];
   if (state.active) {
     const sel = editor.getSelection();
     const hasSel = sel && !sel.isEmpty();
-    const chip = document.createElement('span');
-    chip.className = 'chip' + (state.attachCurrent ? '' : ' off');
-    chip.title = 'Click to toggle attaching the open file';
-    chip.textContent = `📎 ${state.active.split('/').pop()}${hasSel ? ` (lines ${sel.startLineNumber}-${sel.endLineNumber})` : ''}`;
-    chip.onclick = () => {
-      state.attachCurrent = !state.attachCurrent;
-      renderChips();
-    };
-    box.append(chip);
+    chips.push(
+      el('span', {
+        class: `chip${state.attachCurrent ? '' : ' off'}`,
+        title: state.attachCurrent ? 'The open file is attached. Click to detach.' : 'Click to attach the open file',
+        onclick: () => {
+          state.attachCurrent = !state.attachCurrent;
+          renderChips();
+        }
+      }, fileBadge(baseName(state.active)), el('span', { class: 'label', text: `${baseName(state.active)}${hasSel ? ` · lines ${sel.startLineNumber}–${sel.endLineNumber}` : ''}` }))
+    );
   }
   for (const p of extraAttachments) {
     if (p === state.active) continue;
-    const chip = document.createElement('span');
-    chip.className = 'chip';
-    chip.textContent = `📎 ${p}`;
-    const x = document.createElement('button');
-    x.textContent = '✕';
-    x.onclick = () => {
-      extraAttachments.delete(p);
-      renderChips();
-    };
-    chip.append(x);
-    box.append(chip);
+    chips.push(
+      el('span', { class: 'chip', title: p }, fileBadge(baseName(p)), el('span', { class: 'label', text: p }),
+        el('button', { title: 'Remove', onclick: () => { extraAttachments.delete(p); renderChips(); } }, iconEl('x')))
+    );
   }
+  box.replaceChildren(...chips);
 }
 
 function addFileToChat(path) {
@@ -413,7 +854,7 @@ async function buildAttachments() {
   if (state.active && state.attachCurrent) files.add(state.active);
   for (const p of files) {
     let text;
-    const tab = state.tabs.find((t) => t.path === p);
+    const tab = findTab(p);
     try {
       text = tab ? tab.model.getValue() : await api.read(p);
     } catch {
@@ -529,6 +970,15 @@ const TOOLS = [
   }
 ];
 
+const TOOL_INFO = {
+  list_files: { icon: 'list', verb: 'List', doing: 'Listing' },
+  read_file: { icon: 'eye', verb: 'Read', doing: 'Reading' },
+  search_code: { icon: 'search', verb: 'Search', doing: 'Searching for' },
+  write_file: { icon: 'filePlus', verb: 'Write', doing: 'Writing' },
+  edit_file: { icon: 'pencil', verb: 'Edit', doing: 'Editing' },
+  run_command: { icon: 'terminal', verb: 'Run', doing: 'Running' }
+};
+
 function systemPrompt() {
   const win = state.ws?.platform === 'win32';
   const lines = [
@@ -544,9 +994,9 @@ function systemPrompt() {
       '- Explore before you change things: use list_files, search_code and read_file to understand the relevant code. Never guess file contents.',
       '- Always read a file before editing it. Use edit_file for targeted changes and write_file for new files or full rewrites.',
       '- All paths are relative to the project root and use forward slashes.',
-      '- Tool results are produced by the tools you call, not pasted by the user. Use them to keep working on the user\'s request.',
+      "- Tool results are produced by the tools you call, not pasted by the user. Use them to keep working on the user's request.",
       '- Keep going with tool calls until the task is done; do not stop to describe what you are about to do.',
-      '- The user must approve every edit and command; if they reject one, do not retry the same thing — ask what they want instead.',
+      '- If the user rejects an edit or command, do not retry the same thing — ask what they want instead.',
       '- Make focused, minimal changes that match the existing code style. Do not create files the task does not need.',
       '- When you are done, reply with a short summary of what you changed and anything the user should do next.'
     );
@@ -558,115 +1008,183 @@ function systemPrompt() {
       'The user can then apply it to that file with one click. For partial snippets, use a normal fence with just the language.'
     );
   }
-  return lines.filter((l) => l !== undefined).join('\n');
+  return lines.join('\n');
 }
 
-function shortArg(name, args) {
-  return args.path || args.command || args.query || (name === 'list_files' ? '.' : '');
+function describeCall(name, args) {
+  switch (name) {
+    case 'list_files': {
+      const p = normPath(args.path || '.');
+      return { target: p === '.' ? 'project root' : `${p}/` };
+    }
+    case 'read_file': {
+      const p = normPath(args.path);
+      const range = args.start_line || args.end_line ? ` · lines ${args.start_line || 1}–${args.end_line || 'end'}` : '';
+      return { target: baseName(p) + range, path: p, title: p };
+    }
+    case 'search_code':
+      return { target: `“${args.query || ''}”` };
+    case 'write_file':
+    case 'edit_file': {
+      const p = normPath(args.path);
+      return { target: baseName(p), path: p, title: p };
+    }
+    case 'run_command':
+      return { target: args.command || '', mono: true, title: args.command };
+    default:
+      return { target: '' };
+  }
 }
 
-async function executeTool(call, card) {
+// ---------- approvals ----------
+function approvalMode() {
+  return APPROVAL_MODES[state.settings.approvalMode] ? state.settings.approvalMode : 'edits';
+}
+
+function commandPrefix(cmd) {
+  const words = cmd.trim().split(/\s+/);
+  const twoWord = /^(git|npm|npx|yarn|pnpm|pip|pip3|python|python3|py|cargo|dotnet|go|node|cmake|make|msbuild|gradle|mvn)$/i;
+  return (twoWord.test(words[0]) && words[1] && !words[1].startsWith('-') ? words.slice(0, 2) : words.slice(0, 1)).join(' ');
+}
+
+function isAllowedCommand(cmd) {
+  const c = cmd.trim().toLowerCase();
+  return (state.settings.allowedCommands || []).some((p) => {
+    const pre = p.trim().toLowerCase();
+    return pre && (c === pre || c.startsWith(pre + ' '));
+  });
+}
+
+function needsApproval(kind, command) {
+  const mode = approvalMode();
+  if (kind === 'edit') return mode === 'ask';
+  if (DANGEROUS_COMMAND.test(command)) return true;
+  if (mode === 'auto') return false;
+  return mode === 'ask' || !isAllowedCommand(command);
+}
+
+async function allowCommandPrefix(prefix) {
+  const list = state.settings.allowedCommands || [];
+  if (!list.includes(prefix)) state.settings = await api.setSettings({ allowedCommands: [...list, prefix] });
+  flash(`"${prefix}" commands will run without asking`);
+}
+
+// ---------- tool execution ----------
+async function executeTool(call, row) {
   const name = call.function.name;
   let args;
   try {
     args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
   } catch {
-    return `Error: arguments were not valid JSON: ${call.function.arguments.slice(0, 300)}`;
+    return { result: `Error: arguments were not valid JSON: ${call.function.arguments.slice(0, 300)}` };
   }
+  const follow = state.settings.followAgent;
   try {
     switch (name) {
       case 'list_files': {
         const depth = Math.min(6, Math.max(1, parseInt(args.depth, 10) || 2));
         const r = await api.listRecursive(normPath(args.path || '.'), 200, depth);
         const out = r.files.join('\n') || '(empty)';
-        card.setBody(out);
-        return out + (r.truncated ? '\n... (truncated at 200 entries — list a subfolder for more)' : '');
+        row.setBody(out);
+        return { result: out + (r.truncated ? '\n... (truncated at 200 entries — list a subfolder for more)' : ''), meta: `${r.files.length}${r.truncated ? '+' : ''} items` };
       }
       case 'read_file': {
-        const tab = state.tabs.find((t) => t.path === normPath(args.path));
-        let text = tab ? tab.model.getValue() : await api.read(normPath(args.path));
+        const p = normPath(args.path);
+        const tab = findTab(p);
+        let text = tab ? tab.model.getValue() : await api.read(p);
         const all = text.split(/\r?\n/);
-        let header = `${args.path} (${all.length} lines)`;
+        const lineCount = all.length - (all[all.length - 1] === '' ? 1 : 0);
+        let header = `${p} (${lineCount} lines)`;
+        let start = null;
         if (args.start_line || args.end_line) {
-          const s = Math.max(1, args.start_line || 1);
-          const e = Math.min(all.length, args.end_line || all.length);
-          text = all.slice(s - 1, e).join('\n');
-          header += `, showing lines ${s}-${e}`;
+          start = Math.max(1, args.start_line || 1);
+          const end = Math.min(all.length, args.end_line || all.length);
+          text = all.slice(start - 1, end).join('\n');
+          header += `, showing lines ${start}-${end}`;
         }
-        card.setBody(text);
-        return `${header}:\n${truncate(text)}`;
+        row.setBody(text);
+        if (follow) openFile(p, { preview: true, focus: false, line: start });
+        return { result: `${header}:\n${truncate(text)}`, meta: `${lineCount} lines` };
       }
       case 'search_code': {
         const hits = await api.search(args.query, { regex: !!args.regex, limit: 80 });
         const out = hits.length ? hits.map((h) => `${h.path}:${h.line}: ${h.text}`).join('\n') : 'No matches.';
-        card.setBody(out);
-        return out;
+        row.setBody(out);
+        return { result: out, meta: `${hits.length}${hits.length >= 80 ? '+' : ''} matches` };
       }
       case 'write_file': {
         const p = normPath(args.path);
         const content = String(args.content ?? '');
         const exists = await api.exists(p);
-        const original = exists ? await api.read(p) : '';
-        if (exists && original === content) return 'File already has exactly this content; nothing changed.';
-        const ok = await card.requestApproval({
-          question: exists ? `Overwrite ${p}?` : `Create ${p}?`,
-          preview: exists ? unifiedDiff(original, content) : content,
-          isDiff: exists,
-          diff: { path: p, original, modified: content },
-          auto: state.settings.autoApproveEdits
-        });
-        if (!ok) return 'The user rejected this change. Do not retry it; ask the user how they would like to proceed.';
-        await api.write(p, content);
-        syncOpenTab(p, content);
-        if (!exists) expandTo(p);
-        renderTree();
-        return `${exists ? 'Updated' : 'Created'} ${p} (${content.split('\n').length} lines).`;
+        const original = exists ? findTab(p)?.model.getValue() ?? (await api.read(p)) : '';
+        if (exists && original === content) return { result: 'File already has exactly this content; nothing changed.', meta: 'no change' };
+        row.setVerb(exists ? 'Rewrite' : 'Create');
+        return applyAgentEdit(row, p, exists ? original : null, content, exists ? `Rewrite ${p}` : `Create ${p}`);
       }
       case 'edit_file': {
         const p = normPath(args.path);
-        const tab = state.tabs.find((t) => t.path === p);
-        const original = tab ? tab.model.getValue() : await api.read(p);
+        const original = findTab(p)?.model.getValue() ?? (await api.read(p));
         let oldText = String(args.old_text ?? '');
         let newText = String(args.new_text ?? '');
-        if (!oldText) return 'Error: old_text is empty. Use write_file to create or overwrite a file.';
+        if (!oldText) return { result: 'Error: old_text is empty. Use write_file to create or overwrite a file.' };
         if (!original.includes(oldText) && original.includes('\r\n')) {
           oldText = oldText.replace(/\r?\n/g, '\r\n');
           newText = newText.replace(/\r?\n/g, '\r\n');
         }
         const count = original.split(oldText).length - 1;
-        if (count === 0) return `Error: old_text was not found in ${p}. Read the file again and copy the exact text, including whitespace.`;
-        if (count > 1) return `Error: old_text matches ${count} places in ${p}. Include more surrounding lines so it is unique.`;
+        if (count === 0) return { result: `Error: old_text was not found in ${p}. Read the file again and copy the exact text, including whitespace.` };
+        if (count > 1) return { result: `Error: old_text matches ${count} places in ${p}. Include more surrounding lines so it is unique.` };
         const modified = original.replace(oldText, () => newText);
-        const ok = await card.requestApproval({
-          question: `Apply edit to ${p}?`,
-          preview: unifiedDiff(original, modified),
-          isDiff: true,
-          diff: { path: p, original, modified },
-          auto: state.settings.autoApproveEdits
-        });
-        if (!ok) return 'The user rejected this edit. Do not retry it; ask the user how they would like to proceed.';
-        await api.write(p, modified);
-        syncOpenTab(p, modified);
-        return `Edited ${p}.`;
+        return applyAgentEdit(row, p, original, modified, `Edit ${p}`);
       }
       case 'run_command': {
         const cmd = String(args.command || '').trim();
-        if (!cmd) return 'Error: empty command.';
-        const ok = await card.requestApproval({ question: 'Run this command?', preview: cmd, auto: state.settings.autoApproveCommands });
-        if (!ok) return 'The user declined to run this command. Do not retry it; ask the user how they would like to proceed.';
-        showTerminal(true);
-        termWrite(`\n> ${cmd}  (requested by Qwen)\n`, 'term-cmd');
+        if (!cmd) return { result: 'Error: empty command.' };
+        if (needsApproval('command', cmd)) {
+          const ok = await row.requestApproval({ kind: 'command', question: 'Run this command?', command: cmd, dangerous: DANGEROUS_COMMAND.test(cmd) });
+          if (!ok) return { result: 'The user declined to run this command. Do not retry it; ask the user how they would like to proceed.', rejected: true };
+        }
+        showTerminal(true, false);
+        termWrite(`\n❯ ${cmd}  (Qwen)\n`, 'term-cmd');
+        setActivity(`Running ${cmd}`);
         const r = await api.runCommand(cmd);
         termWrite(`[exit code ${r.code}]\n`, 'term-exit');
-        card.setBody(r.output || '(no output)');
-        return `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`;
+        row.setBody(r.output || '(no output)');
+        state.fileIndex = null;
+        renderTree();
+        return { result: `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`, meta: `exit ${r.code}`, failed: r.code !== 0 };
       }
       default:
-        return `Error: unknown tool "${name}". Available tools: ${TOOLS.map((t) => t.function.name).join(', ')}.`;
+        return { result: `Error: unknown tool "${name}". Available tools: ${TOOLS.map((t) => t.function.name).join(', ')}.` };
     }
   } catch (e) {
-    return `Error: ${e.message}`;
+    return { result: `Error: ${e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}` };
   }
+}
+
+// Shared by write_file and edit_file. `before` is null for a new file.
+async function applyAgentEdit(row, p, before, after, title) {
+  const stats = diffStats(before ?? '', after);
+  row.setDiffBody(unifiedDiff(before ?? '', after));
+  if (needsApproval('edit')) {
+    const ok = await row.requestApproval({ kind: 'edit', question: title, path: p, original: before ?? '', modified: after, stats });
+    if (!ok) return { result: 'The user rejected this change. Do not retry it; ask the user how they would like to proceed.', rejected: true };
+  }
+  await api.write(p, after);
+  syncOpenTab(p, after);
+  recordChange(p, before, after);
+  if (before === null) {
+    expandTo(p);
+    state.fileIndex = null;
+  }
+  renderTree();
+  if (state.settings.followAgent) {
+    await openFile(p, { preview: true, focus: false });
+    highlightChanges(p, before, after);
+  }
+  row.onTarget(() => openChangeReview(p));
+  const verb = before === null ? 'Created' : 'Edited';
+  return { result: `${verb} ${p} (${after.split('\n').length} lines, +${stats.added} −${stats.removed}).`, metaHtml: statsHtml(stats) };
 }
 
 function normPath(p) {
@@ -740,46 +1258,58 @@ function extractTextToolCalls(content) {
 function newChat() {
   if (state.busy) stopChat();
   state.history = [];
-  $('#messages').innerHTML = '';
-  $('#messages').append(emptyState());
-  setStatus('');
+  state.lastUsage = null;
+  $('#chat-title').textContent = 'New chat';
+  renderChatEmpty();
+  updateCtxMeter();
+  setActivity('');
 }
 
-function emptyState() {
-  const tpl = document.createElement('div');
-  tpl.className = 'chat-empty';
-  tpl.innerHTML = `<p><b>Ask Qwen anything about your project.</b></p>
-    <div class="suggestions">
-      <button data-prompt="Give me an overview of this project: what it does, how it's structured, and how to run it.">Explain this project</button>
-      <button data-prompt="Review the current file for bugs and suggest improvements.">Review current file</button>
-      <button data-prompt="Write unit tests for the current file.">Write tests</button>
-      <button data-prompt="Find and fix the bug: ">Fix a bug…</button>
-    </div>`;
-  tpl.querySelectorAll('button').forEach((b) => {
-    b.onclick = () => {
-      $('#prompt').value = b.dataset.prompt;
-      $('#prompt').focus();
-      if (!b.dataset.prompt.endsWith(': ')) send();
-    };
-  });
-  return tpl;
+function renderChatEmpty() {
+  const suggestions = [
+    ['book', 'Explain this project', "Give me an overview of this project: what it does, how it's structured, and how to build and run it."],
+    ['eye', 'Review the open file', 'Review the open file for bugs and suggest improvements.'],
+    ['bug', 'Fix a bug…', 'Find and fix this bug: ', true],
+    ['wand', 'Add a feature…', 'Add this feature: ', true]
+  ];
+  $('#messages').replaceChildren(
+    el('div', { class: 'chat-empty' },
+      el('span', { class: 'logo', text: 'Q' }),
+      el('h2', { text: state.ws ? `What should we do in ${state.ws.name}?` : 'What are we building?' }),
+      el('p', { text: state.ws ? 'Qwen can read, search and edit this project.' : 'Open a folder so Qwen can work with your files.' }),
+      el('div', { class: 'suggestions' }, ...suggestions.map(([ic, label, prompt, fill]) =>
+        el('button', { onclick: () => setPrompt(prompt, !fill) }, iconEl(ic), label))))
+  );
+}
+
+function setPrompt(text, sendNow) {
+  const input = $('#prompt');
+  input.value = text;
+  autoGrow();
+  input.focus();
+  input.setSelectionRange(text.length, text.length);
+  if (sendNow) send();
 }
 
 async function send() {
   const input = $('#prompt');
   const text = input.value.trim();
   if (!text || state.busy) return;
-  if (!state.ws && state.settings.agentMode) {
-    // Plain chat works without a folder; agent tools need one.
-    setStatus('Tip: open a folder so Qwen can work with your files.');
-  }
   input.value = '';
-  $('#chat-empty')?.remove();
-  document.querySelector('#messages .chat-empty')?.remove();
+  autoGrow();
+  $('#messages .chat-empty')?.remove();
+  if (!state.history.length) $('#chat-title').textContent = text.length > 60 ? text.slice(0, 57) + '…' : text;
 
   const att = await buildAttachments();
+  renderChips();
   addUserMessage(text, att.names);
-  state.history.push({ role: 'user', content: att.text ? `${text}\n\n---\nAttached context:\n${att.text}` : text });
+  let content = text;
+  if (state.notes.length) {
+    content = `(Note: ${state.notes.join(' ')})\n\n${content}`;
+    state.notes = [];
+  }
+  if (att.text) content += `\n\n---\nAttached context:\n${att.text}`;
+  state.history.push({ role: 'user', content });
 
   setBusy(true);
   try {
@@ -796,13 +1326,12 @@ async function runConversation() {
     const view = addAssistantMessage();
     const id = `c${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
     state.currentChatId = id;
-    setStatus(step === 0 ? 'Qwen is thinking…' : `Qwen is working… (step ${step + 1})`);
+    setActivity(step === 0 ? 'Thinking' : 'Working');
 
     const off = api.onChatEvent((ev) => {
       if (ev.id !== id) return;
       if (ev.type === 'delta') view.appendContent(ev.data);
       else if (ev.type === 'reasoning') view.appendReasoning(ev.data);
-      else if (ev.type === 'tool_progress') setStatus(`Qwen is calling ${ev.data.join(', ')}…`);
     });
     const res = await api.chatStream(id, {
       messages: [{ role: 'system', content: systemPrompt() }, ...state.history],
@@ -814,20 +1343,20 @@ async function runConversation() {
     state.currentChatId = null;
     if (res.ok && !res.aborted) view.setFinal(res.content || '', res.reasoning || '');
     if (res.usage?.promptTokens && res.usage.contextLength) {
-      const { promptTokens, contextLength } = res.usage;
-      state.lastUsage = `Context: ${promptTokens.toLocaleString()} / ${contextLength.toLocaleString()} tokens`;
-      if (promptTokens >= contextLength * 0.95) {
-        addError(`The conversation (${promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${contextLength.toLocaleString()}), so the oldest messages — including your instructions — were cut off. Raise "Context window" in Settings (⚙) or start a New chat.`);
+      state.lastUsage = res.usage;
+      updateCtxMeter();
+      if (res.usage.promptTokens >= res.usage.contextLength * 0.95) {
+        addError(`The conversation (${res.usage.promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${res.usage.contextLength.toLocaleString()}), so the oldest messages — including your instructions — were cut off. Raise "Context window" in Settings or start a new chat.`);
       }
     }
 
     if (!res.ok) {
-      view.finish();
+      view.finish(false);
       addError(res.error, useTools);
       break;
     }
     if (res.aborted) {
-      view.finish();
+      view.finish(false);
       break;
     }
 
@@ -839,7 +1368,7 @@ async function runConversation() {
       content = parsed.cleaned;
       view.setContent(content);
     }
-    view.finish();
+    view.finish(calls.length > 0);
 
     const msg = { role: 'assistant', content: stripThink(content) };
     if (calls.length) msg.tool_calls = calls;
@@ -851,20 +1380,21 @@ async function runConversation() {
         state.history.push({ role: 'tool', tool_call_id: call.id, content: 'Cancelled by the user.' });
         continue;
       }
-      const card = view.addToolCard(call);
-      const result = await executeTool(call, card);
-      card.done(result);
-      state.history.push({ role: 'tool', tool_call_id: call.id, content: result });
+      const row = view.addStep(call);
+      setActivity(`${row.doing} ${row.target}`);
+      const out = await executeTool(call, row);
+      row.done(out);
+      state.history.push({ role: 'tool', tool_call_id: call.id, content: out.result });
     }
     if (step === MAX_AGENT_STEPS - 1) addError(`Stopped after ${MAX_AGENT_STEPS} steps. Send a message to let Qwen continue.`);
   }
-  setStatus(state.stopRequested ? 'Stopped.' : state.lastUsage || '');
+  setActivity('');
 }
 
 function stopChat() {
   state.stopRequested = true;
   if (state.currentChatId) api.chatAbort(state.currentChatId);
-  document.querySelectorAll('.tool .approval button.reject').forEach((b) => b.click());
+  state.pendingApproval?.finish(false);
 }
 
 function setBusy(b) {
@@ -872,10 +1402,28 @@ function setBusy(b) {
   if (b) state.stopRequested = false;
   $('#btn-send').classList.toggle('hidden', b);
   $('#btn-stop').classList.toggle('hidden', !b);
+  if (!b) setActivity('');
 }
 
-function setStatus(t) {
-  $('#status-text').textContent = t;
+function setActivity(text) {
+  $('#activity').classList.toggle('hidden', !text);
+  $('#activity-text').textContent = text ? `${text}…` : '';
+}
+
+function updateCtxMeter() {
+  const m = $('#ctx-meter');
+  const u = state.lastUsage;
+  if (!u) {
+    m.classList.add('hidden');
+    return;
+  }
+  const pct = Math.min(100, Math.round((u.promptTokens / u.contextLength) * 100));
+  m.classList.remove('hidden');
+  m.classList.toggle('warn', pct >= 70 && pct < 95);
+  m.classList.toggle('full', pct >= 95);
+  m.querySelector('i').style.width = `${pct}%`;
+  m.querySelector('.txt').textContent = `${pct}%`;
+  m.title = `Context used: ${u.promptTokens.toLocaleString()} of ${u.contextLength.toLocaleString()} tokens. Start a new chat when it gets full.`;
 }
 
 function stripThink(s) {
@@ -890,16 +1438,16 @@ renderer.code = function ({ text, lang }) {
   const info = (lang || '').trim().split(/\s+/);
   const language = info[0] || '';
   const filePath = info.slice(1).join(' ').replace(/^(path|file)=/, '');
-  return `<pre data-lang="${escapeAttr(language)}" data-path="${escapeAttr(filePath)}"><code>${escapeHtml(text)}</code></pre>`;
+  return `<pre data-lang="${escapeHtml(language)}" data-path="${escapeHtml(filePath)}"><code>${escapeHtml(text)}</code></pre>`;
 };
 // Models often write tags like <tool_call> or <vector> in prose; show them as text instead of
 // letting the sanitizer silently delete them.
 renderer.html = ({ text }) => escapeHtml(text);
 marked.setOptions({ renderer, gfm: true, breaks: false });
 
-function renderMarkdown(el, text) {
-  el.innerHTML = DOMPurify.sanitize(marked.parse(text), { FORBID_TAGS: ['style', 'form', 'input'] });
-  el.querySelectorAll('pre').forEach(decorateCodeBlock);
+function renderMarkdown(node, text) {
+  node.innerHTML = DOMPurify.sanitize(marked.parse(text), { FORBID_TAGS: ['style', 'form', 'input'] });
+  node.querySelectorAll('pre').forEach(decorateCodeBlock);
 }
 
 function decorateCodeBlock(pre) {
@@ -907,40 +1455,32 @@ function decorateCodeBlock(pre) {
   const text = code ? code.textContent : pre.textContent;
   const lang = pre.dataset.lang || '';
   const filePath = pre.dataset.path || '';
-  const wrap = document.createElement('div');
-  wrap.className = 'codeblock';
-  const head = document.createElement('div');
-  head.className = 'cb-head';
-  const label = document.createElement('span');
-  label.className = 'label';
-  label.textContent = filePath || lang || 'code';
-  head.append(label);
-
-  const mk = (txt, title, fn) => {
-    const b = document.createElement('button');
-    b.textContent = txt;
-    b.title = title;
-    b.onclick = fn;
-    head.append(b);
-    return b;
-  };
-  mk('Copy', 'Copy to clipboard', async (e) => {
-    await navigator.clipboard.writeText(text);
-    e.target.textContent = 'Copied ✓';
-    setTimeout(() => (e.target.textContent = 'Copy'), 1200);
-  });
-  mk('Insert', 'Insert at the cursor / replace the selection in the editor', () => {
-    if (!state.active) return alert('Open a file first.');
-    const sel = editor.getSelection();
-    editor.executeEdits('qwen', [{ range: sel, text, forceMoveMarkers: true }]);
-    editor.focus();
-  });
-  if (filePath && state.ws) {
-    mk('Apply to file', `Write this code to ${filePath} (shows a diff first)`, () => applyCodeToFile(normPath(filePath), text));
-  }
+  const label = el('span', { class: 'label' });
+  if (filePath) label.append(fileBadge(baseName(filePath)), el('span', { text: filePath }));
+  else label.textContent = lang || 'code';
+  const head = el('div', { class: 'cb-head' }, label,
+    el('button', {
+      title: 'Copy to clipboard',
+      onclick: async (e) => {
+        await navigator.clipboard.writeText(text);
+        const b = e.currentTarget;
+        b.lastChild.textContent = 'Copied';
+        setTimeout(() => (b.lastChild.textContent = 'Copy'), 1200);
+      }
+    }, iconEl('copy'), el('span', { text: 'Copy' })),
+    el('button', {
+      title: 'Insert at the cursor (or replace the selection) in the open file',
+      onclick: () => {
+        if (!state.active) return alert('Open a file first.');
+        editor.executeEdits('qwen', [{ range: editor.getSelection(), text, forceMoveMarkers: true }]);
+        editor.focus();
+      }
+    }, iconEl('insert'), 'Insert'),
+    filePath && state.ws ? el('button', { class: 'apply', title: `Write this code to ${filePath} (shows a diff first)`, onclick: () => applyCodeToFile(normPath(filePath), text) }, iconEl('check'), 'Apply') : null
+  );
+  const wrap = el('div', { class: 'codeblock' });
   pre.replaceWith(wrap);
   wrap.append(head, pre);
-
   const monLang = monacoLang(lang);
   if (code && monLang) {
     monaco.editor.colorize(text, monLang, { tabSize: 2 }).then((html) => {
@@ -952,65 +1492,62 @@ function decorateCodeBlock(pre) {
 function monacoLang(lang) {
   if (!lang) return null;
   const l = lang.toLowerCase();
-  const alias = { js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', sh: 'shell', bash: 'shell', zsh: 'shell', ps1: 'powershell', cs: 'csharp', 'c#': 'csharp', 'c++': 'cpp', rs: 'rust', yml: 'yaml', md: 'markdown', html: 'html', vue: 'html', golang: 'go', kt: 'kotlin', rb: 'ruby' };
+  const alias = { js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', sh: 'shell', bash: 'shell', zsh: 'shell', ps1: 'powershell', cs: 'csharp', 'c#': 'csharp', 'c++': 'cpp', rs: 'rust', yml: 'yaml', md: 'markdown', vue: 'html', golang: 'go', kt: 'kotlin', rb: 'ruby', bat: 'bat', cmd: 'bat' };
   const id = alias[l] || l;
   return monaco.languages.getLanguages().some((x) => x.id === id) ? id : null;
 }
 
 async function applyCodeToFile(p, content) {
   const exists = await api.exists(p);
-  const original = exists ? await api.read(p) : '';
-  const ok = await showDiff(`${exists ? 'Apply changes to' : 'Create'} ${p}`, p, original, content, true);
+  const original = exists ? findTab(p)?.model.getValue() ?? (await api.read(p)) : null;
+  const ok = await new Promise((resolve) => {
+    state.pendingApproval = {
+      cancelOnClose: true,
+      finish: (v) => {
+        state.pendingApproval = null;
+        closeReview(true);
+        resolve(v);
+      }
+    };
+    openReview({ path: p, original: original ?? '', modified: content, pending: true, title: `${exists ? 'Apply changes to' : 'Create'} ${p}` });
+  });
   if (!ok) return;
   await api.write(p, content);
   syncOpenTab(p, content);
+  recordChange(p, original, content);
   expandTo(p);
+  state.fileIndex = null;
   await renderTree();
-  openFile(p);
-  setStatus(`Wrote ${p}`);
+  await openFile(p);
+  highlightChanges(p, original, content);
+  flash(`Wrote ${p}`);
 }
 
 function addUserMessage(text, attached) {
-  const el = document.createElement('div');
-  el.className = 'msg user';
-  el.textContent = text;
-  if (attached.length) {
-    const a = document.createElement('span');
-    a.className = 'attached';
-    a.textContent = `📎 ${attached.join(', ')}`;
-    el.append(a);
-  }
-  $('#messages').append(el);
+  const node = el('div', { class: 'msg user' }, text);
+  if (attached.length) node.append(el('div', { class: 'attached' }, ...attached.map((a) => el('span', { text: baseName(a), title: a }))));
+  $('#messages').append(node);
   scrollChat(true);
 }
 
 function addError(text, usedTools) {
-  const el = document.createElement('div');
-  el.className = 'msg error';
   let hint = '';
   if (usedTools && /tool|function/i.test(text)) {
-    hint = '\n\nThis model may not support tool calling. Turn off "Agent" mode in the chat header, or pick a tool-capable model such as qwen2.5-coder, qwen3 or qwen3-coder.';
+    hint = '\n\nThis model may not support tool calling. Switch to "Chat" below the message box, or pick a tool-capable model such as qwen2.5-coder, qwen3 or qwen3-coder.';
   } else if (/connect|ECONNREFUSED|fetch failed/i.test(text)) {
-    hint = '\n\nCheck Settings (⚙): is the base URL right and is the server running? For Ollama run "ollama serve" and "ollama pull ' + state.settings.model + '".';
+    hint = `\n\nCheck Settings: is the base URL right and is the server running? For Ollama run "ollama serve" and "ollama pull ${state.settings.model}".`;
   } else if (/401|403|api key|unauthorized/i.test(text)) {
-    hint = '\n\nCheck the API key in Settings (⚙).';
+    hint = '\n\nCheck the API key in Settings.';
   }
-  el.textContent = text + hint;
-  $('#messages').append(el);
+  $('#messages').append(el('div', { class: 'msg error' }, iconEl('alert'), el('div', { text: text + hint })));
   scrollChat(true);
 }
 
 function addAssistantMessage() {
-  const el = document.createElement('div');
-  el.className = 'msg assistant';
-  const think = document.createElement('details');
-  think.className = 'think hidden';
-  think.innerHTML = '<summary>Thinking…</summary><div class="think-body"></div>';
-  const md = document.createElement('div');
-  md.className = 'md cursor';
-  const tools = document.createElement('div');
-  el.append(think, md, tools);
-  $('#messages').append(el);
+  const think = el('details', { class: 'think hidden' }, el('summary', {}, iconEl('chevronRight'), el('span', { class: 'think-label', text: 'Thinking' })), el('div', { class: 'think-body' }));
+  const md = el('div', { class: 'md cursor' });
+  const steps = el('div', { class: 'steps' });
+  $('#messages').append(el('div', { class: 'msg assistant' }, think, md, steps));
   scrollChat(true);
 
   let content = '';
@@ -1020,9 +1557,8 @@ function addAssistantMessage() {
   const draw = () => {
     pending = false;
     // Split inline <think> blocks (Qwen3 / QwQ) out of the visible answer.
-    let visible = content;
     let inlineThink = '';
-    visible = visible.replace(/<think>([\s\S]*?)(<\/think>|$)/g, (_m, t) => {
+    let visible = content.replace(/<think>([\s\S]*?)(<\/think>|$)/g, (_m, t) => {
       inlineThink += t;
       return '';
     });
@@ -1061,136 +1597,192 @@ function addAssistantMessage() {
       reasoning = r;
       schedule();
     },
-    finish() {
+    finish(hasCalls) {
       draw();
       md.classList.remove('cursor');
-      think.querySelector('summary').textContent = 'Thought process';
-      if (!stripThink(content) && !md.textContent.trim()) md.classList.add('hidden');
+      md.classList.toggle('narration', !!hasCalls);
+      think.querySelector('.think-label').textContent = 'Thought process';
     },
-    addToolCard(call) {
-      return makeToolCard(tools, call);
+    addStep(call) {
+      return makeStepRow(steps, call);
     }
   };
 }
 
-function makeToolCard(container, call) {
+function makeStepRow(container, call) {
   let args = {};
   try {
     args = JSON.parse(call.function.arguments || '{}');
   } catch {
     /* shown raw below */
   }
-  const el = document.createElement('div');
-  el.className = 'tool';
-  el.innerHTML = '<div class="tool-head"><span>🔧</span><span class="tool-name"></span><span class="tool-arg"></span><span class="tool-status wait">running…</span></div><div class="tool-body"><pre></pre></div>';
-  el.querySelector('.tool-name').textContent = call.function.name;
-  el.querySelector('.tool-arg').textContent = shortArg(call.function.name, args);
-  el.querySelector('.tool-head').onclick = () => el.classList.toggle('open');
-  const status = el.querySelector('.tool-status');
-  const body = el.querySelector('.tool-body pre');
-  container.append(el);
+  const name = call.function.name;
+  const info = TOOL_INFO[name] || { icon: 'sparkles', verb: name, doing: 'Running' };
+  const d = describeCall(name, args);
+  const body = el('pre');
+  const meta = el('span', { class: 'step-meta' });
+  const stateEl = el('span', { class: 'step-state' }, el('span', { class: 'spinner' }));
+  const verb = el('span', { class: 'step-verb', text: info.verb });
+  const target = el('span', { class: `step-target${d.mono ? ' mono' : ''}${d.path ? ' link' : ''}`, text: d.target, title: d.title || d.target });
+  const head = el('div', { class: 'step-head' }, iconEl(info.icon), verb, target, meta, stateEl, iconEl('chevronRight', 'chev'));
+  const row = el('div', { class: 'step running' }, head, el('div', { class: 'step-body' }, body));
+  let onTarget = d.path ? () => openFile(d.path, { preview: true }) : null;
+  target.addEventListener('click', (e) => {
+    if (onTarget) {
+      e.stopPropagation();
+      onTarget();
+    }
+  });
+  head.onclick = () => row.classList.toggle('open');
+  container.append(row);
   scrollChat();
 
   return {
+    doing: info.doing,
+    target: d.target,
     setBody(text) {
       body.textContent = text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
     },
-    done(result) {
-      const failed = /^Error|rejected|declined|Cancelled/.test(result);
-      status.className = 'tool-status ' + (failed ? 'bad' : 'ok');
-      status.textContent = failed ? (/rejected|declined/.test(result) ? 'rejected' : 'failed') : 'done';
-      if (!body.textContent) body.textContent = result;
+    setDiffBody(diffText) {
+      renderDiffPreview(body, diffText);
     },
-    requestApproval({ question, preview, isDiff, diff, auto }) {
-      if (isDiff) renderDiffPreview(body, preview);
-      else body.textContent = preview;
-      el.classList.add('open');
-      if (auto) {
-        status.textContent = 'auto-approved';
-        return Promise.resolve(true);
+    setVerb(v) {
+      verb.textContent = v;
+    },
+    onTarget(fn) {
+      onTarget = fn;
+      target.classList.add('link');
+    },
+    done(out) {
+      const failed = out.failed || /^Error/.test(out.result) || out.rejected || /^Cancelled/.test(out.result);
+      row.classList.remove('running', 'waiting');
+      row.classList.add(failed ? 'bad' : 'ok');
+      stateEl.innerHTML = icon(failed ? 'x' : 'check');
+      if (out.metaHtml) meta.innerHTML = out.metaHtml;
+      else meta.textContent = out.rejected ? 'rejected' : /^Error/.test(out.result) ? 'failed' : out.meta || '';
+      if (/^Error/.test(out.result)) {
+        body.textContent = out.result;
+        stateEl.title = out.result;
       }
-      status.textContent = 'waiting for you';
-      setStatus('Waiting for your approval…');
+    },
+    requestApproval(opts) {
+      row.classList.remove('running');
+      row.classList.add('waiting');
+      stateEl.innerHTML = icon('alert');
+      setActivity('Waiting for your approval');
       return new Promise((resolve) => {
-        const bar = document.createElement('div');
-        bar.className = 'approval';
-        const q = document.createElement('span');
-        q.className = 'q';
-        q.textContent = question;
-        bar.append(q);
+        const bar = el('div', { class: 'step-approval' });
         const finish = (v) => {
+          if (state.pendingApproval?.finish === finish) state.pendingApproval = null;
           bar.remove();
-          el.classList.remove('open');
-          setStatus(v ? 'Approved.' : 'Rejected.');
+          row.classList.remove('waiting');
+          row.classList.add('running');
+          stateEl.replaceChildren(el('span', { class: 'spinner' }));
+          if (state.review?.pending && state.review.path === opts.path) closeReview(true);
+          setActivity(v ? 'Working' : '');
           resolve(v);
         };
-        if (diff) {
-          const view = document.createElement('button');
-          view.textContent = 'View diff';
-          view.onclick = async () => {
-            const r = await showDiff(question, diff.path, diff.original, diff.modified, true);
-            if (r !== null) finish(r);
-          };
-          bar.append(view);
+        state.pendingApproval = { finish };
+        if (opts.kind === 'edit') {
+          bar.append(
+            el('div', { class: 'q' }, el('span', { text: opts.question }), el('span', { class: 'stats', html: statsHtml(opts.stats) })),
+            el('div', { class: 'btns' },
+              el('button', { class: 'ghost', onclick: () => openReview({ path: opts.path, original: opts.original, modified: opts.modified, pending: true, title: opts.question }) }, iconEl('columns'), 'Review'),
+              el('button', { class: 'ghost danger-text', onclick: () => finish(false) }, 'Reject'),
+              el('button', { class: 'primary', onclick: () => finish(true) }, iconEl('check'), 'Approve'))
+          );
+          if (state.settings.followAgent) openReview({ path: opts.path, original: opts.original, modified: opts.modified, pending: true, title: opts.question });
+        } else {
+          const prefix = commandPrefix(opts.command);
+          bar.append(
+            el('div', { class: 'q' }, el('span', { text: opts.dangerous ? 'This command could delete or overwrite things. Run it?' : opts.question })),
+            el('div', { class: 'cmd', text: opts.command }),
+            el('div', { class: 'btns' },
+              el('button', { class: 'ghost danger-text', onclick: () => finish(false) }, 'Reject'),
+              opts.dangerous ? null : el('button', { class: 'ghost', title: `Run this, and run future "${prefix}" commands without asking`, onclick: async () => { await allowCommandPrefix(prefix); finish(true); } }, `Always allow “${prefix}”`),
+              el('button', { class: 'primary', onclick: () => finish(true) }, iconEl('play'), 'Run'))
+          );
         }
-        const yes = document.createElement('button');
-        yes.className = 'primary';
-        yes.textContent = 'Approve';
-        yes.onclick = () => finish(true);
-        const no = document.createElement('button');
-        no.className = 'reject';
-        no.textContent = 'Reject';
-        no.onclick = () => finish(false);
-        bar.append(yes, no);
-        el.append(bar);
+        row.append(bar);
         scrollChat(true);
-        yes.focus();
+        bar.querySelector('button.primary').focus({ preventScroll: true });
       });
     }
   };
 }
 
 function renderDiffPreview(pre, diffText) {
-  pre.innerHTML = '';
-  for (const line of diffText.split('\n')) {
-    const span = document.createElement('div');
-    span.className = 'diff-line' + (line.startsWith('+') ? ' add' : line.startsWith('-') ? ' del' : line.startsWith('@@') ? ' hunk' : '');
-    span.textContent = line || ' ';
-    pre.append(span);
-  }
+  pre.replaceChildren(
+    ...diffText.split('\n').slice(0, 400).map((line) =>
+      el('div', { class: `diff-line${line.startsWith('+') ? ' add' : line.startsWith('-') ? ' del' : line.startsWith('@@') ? ' hunk' : ''}`, text: line || ' ' }))
+  );
 }
 
-// Small line-based unified diff (LCS), good enough for previews of source files.
-function unifiedDiff(a, b, context = 3) {
-  const A = a.split(/\r?\n/);
-  const B = b.split(/\r?\n/);
-  if (A.length * B.length > 4_000_000) {
-    return `(file too large for an inline diff — ${A.length} → ${B.length} lines; use "View diff")`;
-  }
-  const n = A.length;
-  const m = B.length;
+function scrollChat(force) {
+  const box = $('#messages');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
+  if (force || nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+// ===================================================================
+// Diffs
+// ===================================================================
+// Line-based LCS diff with common prefix/suffix trimmed, so big files with small edits stay cheap.
+// Returns [op, line, indexInA, indexInB] entries, or null when the changed region is too large.
+function diffOps(a, b) {
+  const A = a === '' ? [] : a.split(/\r?\n/);
+  const B = b === '' ? [] : b.split(/\r?\n/);
+  let pre = 0;
+  while (pre < A.length && pre < B.length && A[pre] === B[pre]) pre++;
+  let suf = 0;
+  while (suf < A.length - pre && suf < B.length - pre && A[A.length - 1 - suf] === B[B.length - 1 - suf]) suf++;
+  const a2 = A.slice(pre, A.length - suf);
+  const b2 = B.slice(pre, B.length - suf);
+  if (a2.length * b2.length > 4_000_000) return null;
+  const n = a2.length;
+  const m = b2.length;
   const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      dp[i][j] = a2[i] === b2[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
   const ops = [];
+  for (let k = 0; k < pre; k++) ops.push([' ', A[k], k, k]);
   let i = 0;
   let j = 0;
   while (i < n || j < m) {
-    if (i < n && j < m && A[i] === B[j]) {
-      ops.push([' ', A[i], i, j]);
+    if (i < n && j < m && a2[i] === b2[j]) {
+      ops.push([' ', a2[i], i + pre, j + pre]);
       i++;
       j++;
     } else if (j < m && (i >= n || dp[i][j + 1] >= dp[i + 1][j])) {
-      ops.push(['+', B[j], i, j]);
+      ops.push(['+', b2[j], i + pre, j + pre]);
       j++;
     } else {
-      ops.push(['-', A[i], i, j]);
+      ops.push(['-', a2[i], i + pre, j + pre]);
       i++;
     }
   }
+  for (let k = 0; k < suf; k++) ops.push([' ', A[A.length - suf + k], A.length - suf + k, B.length - suf + k]);
+  return ops;
+}
+
+function diffStats(a, b) {
+  const ops = diffOps(a, b);
+  if (!ops) return { added: b.split('\n').length, removed: a.split('\n').length };
+  let added = 0;
+  let removed = 0;
+  for (const [op] of ops) {
+    if (op === '+') added++;
+    else if (op === '-') removed++;
+  }
+  return { added, removed };
+}
+
+function unifiedDiff(a, b, context = 3) {
+  const ops = diffOps(a, b);
+  if (!ops) return '(change too large for an inline preview — use Review)';
   const out = [];
   let k = 0;
   while (k < ops.length) {
@@ -1198,7 +1790,7 @@ function unifiedDiff(a, b, context = 3) {
       k++;
       continue;
     }
-    let start = Math.max(0, k - context);
+    const start = Math.max(0, k - context);
     let end = k;
     while (end < ops.length) {
       if (ops[end][0] !== ' ') {
@@ -1213,121 +1805,201 @@ function unifiedDiff(a, b, context = 3) {
       }
       end += run;
     }
-    out.push(`@@ line ${ops[start][2] + 1} @@`);
+    out.push(`@@ line ${ops[start][3] + 1} @@`);
     for (let x = start; x < end; x++) out.push(ops[x][0] + ops[x][1]);
     k = end;
   }
   return out.join('\n') || '(no changes)';
 }
 
-function scrollChat(force) {
-  const box = $('#messages');
-  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
-  if (force || nearBottom) box.scrollTop = box.scrollHeight;
-}
-
-// ===================================================================
-// Diff modal
-// ===================================================================
-let diffResolve = null;
-function showDiff(title, path, original, modified, withActions) {
-  const modal = $('#diff-modal');
-  $('#diff-title').textContent = title;
-  modal.classList.remove('hidden');
-  if (!diffEditor) {
-    diffEditor = monaco.editor.createDiffEditor($('#diff-editor'), { theme: 'vs-dark', automaticLayout: true, readOnly: true, renderSideBySide: true });
-  }
-  const old = diffEditor.getModel();
-  const uriA = monaco.Uri.parse(`diff-a:/${path}?${Date.now()}`);
-  const uriB = monaco.Uri.parse(`diff-b:/${path}?${Date.now()}`);
-  const ext = '.' + path.split('.').pop().toLowerCase();
-  const lang = monaco.languages.getLanguages().find((l) => l.extensions?.includes(ext))?.id || 'plaintext';
-  diffEditor.setModel({
-    original: monaco.editor.createModel(original, lang, uriA),
-    modified: monaco.editor.createModel(modified, lang, uriB)
-  });
-  old?.original.dispose();
-  old?.modified.dispose();
-
-  let actions = modal.querySelector('.diff-actions');
-  actions?.remove();
-  return new Promise((resolve) => {
-    diffResolve = resolve;
-    if (withActions) {
-      actions = document.createElement('div');
-      actions.className = 'modal-actions diff-actions';
-      const no = document.createElement('button');
-      no.textContent = 'Reject';
-      const yes = document.createElement('button');
-      yes.className = 'primary';
-      yes.textContent = 'Approve & write file';
-      no.onclick = () => closeDiff(false);
-      yes.onclick = () => closeDiff(true);
-      actions.append(no, yes);
-      modal.querySelector('.modal-box').append(actions);
-    }
-  });
-}
-function closeDiff(result) {
-  $('#diff-modal').classList.add('hidden');
-  const r = diffResolve;
-  diffResolve = null;
-  r?.(result);
-}
-
 // ===================================================================
 // Terminal
 // ===================================================================
-function showTerminal(show) {
+function showTerminal(show, focus = true) {
   $('#terminal').classList.toggle('hidden', !show);
-  if (show) $('#term-in').focus();
+  $('#act-terminal').classList.toggle('active', show);
+  if (show && focus) $('#term-in').focus();
+  saveLayout();
 }
 function termWrite(text, cls) {
   const out = $('#term-out');
-  const span = document.createElement('span');
-  if (cls) span.className = cls;
-  span.textContent = text;
-  out.append(span);
+  out.append(el('span', { class: cls, text }));
   out.scrollTop = out.scrollHeight;
 }
 api.onCommandOutput((t) => termWrite(t));
 
 async function runTerminalCommand(cmd) {
   if (!requireWorkspace()) return;
-  termWrite(`\n> ${cmd}\n`, 'term-cmd');
+  termWrite(`\n❯ ${cmd}\n`, 'term-cmd');
   $('#term-in').disabled = true;
   const r = await api.runCommand(cmd, 10 * 60_000);
   termWrite(`[exit code ${r.code}]\n`, 'term-exit');
   $('#term-in').disabled = false;
   $('#term-in').focus();
+  state.fileIndex = null;
   renderTree();
 }
 
 // ===================================================================
-// Settings
+// Go to file (Ctrl+P) / attach file
+// ===================================================================
+async function openQuick(mode = 'open') {
+  if (!requireWorkspace()) return;
+  state.quick = { mode, items: [], sel: 0 };
+  const input = $('#quick-input');
+  input.value = '';
+  input.placeholder = mode === 'attach' ? 'Attach a file to your next message…' : 'Go to file…';
+  $('#quick-modal').classList.remove('hidden');
+  input.focus();
+  if (!state.fileIndex) {
+    $('#quick-list').replaceChildren(el('div', { class: 'quick-empty', text: 'Indexing files…' }));
+    const r = await api.listRecursive('.', 20000, 20);
+    state.fileIndex = r.files.filter((f) => !f.endsWith('/'));
+  }
+  renderQuick();
+}
+
+function fuzzyScore(path, q) {
+  if (!q) return 1;
+  const lower = path.toLowerCase();
+  const name = baseName(lower);
+  if (name.includes(q)) return 1000 - name.length + (name.startsWith(q) ? 200 : 0);
+  if (lower.includes(q)) return 500 - lower.length / 10;
+  let pi = 0;
+  let score = 0;
+  for (const ch of q) {
+    const found = lower.indexOf(ch, pi);
+    if (found < 0) return -1;
+    score += found === pi ? 3 : 1;
+    pi = found + 1;
+  }
+  return score;
+}
+
+function renderQuick() {
+  const q = $('#quick-input').value.trim().toLowerCase().replace(/\\/g, '/');
+  const items = (state.fileIndex || [])
+    .map((p) => [p, fuzzyScore(p, q)])
+    .filter(([, s]) => s >= 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 60)
+    .map(([p]) => p);
+  state.quick.items = items;
+  state.quick.sel = Math.min(state.quick.sel, Math.max(0, items.length - 1));
+  const list = $('#quick-list');
+  if (!items.length) {
+    list.replaceChildren(el('div', { class: 'quick-empty', text: 'No matching files.' }));
+    return;
+  }
+  list.replaceChildren(...items.map((p, i) =>
+    el('div', { class: `qi${i === state.quick.sel ? ' sel' : ''}`, onmousedown: (e) => { e.preventDefault(); chooseQuick(i); } },
+      fileBadge(baseName(p)), el('span', { class: 'name', text: baseName(p) }), el('span', { class: 'dir', text: parentDir(p) === '.' ? '' : parentDir(p) }))));
+  list.querySelector('.qi.sel')?.scrollIntoView({ block: 'nearest' });
+}
+
+function chooseQuick(i) {
+  const p = state.quick.items[i];
+  closeQuick();
+  if (!p) return;
+  if (state.quick.mode === 'attach') addFileToChat(p);
+  else openFile(p);
+}
+
+function closeQuick() {
+  $('#quick-modal').classList.add('hidden');
+}
+
+// ===================================================================
+// Settings & status bar
 // ===================================================================
 function applySettingsToUi() {
   const s = state.settings;
   $('#model-name').textContent = s.model || 'no model';
-  $('#agent-toggle').checked = s.agentMode;
   editor?.updateOptions({ fontSize: Number(s.fontSize) || 14 });
+  reviewEditor?.updateOptions({ fontSize: Number(s.fontSize) || 14 });
+  $$('#mode-seg button').forEach((b) => b.classList.toggle('on', (b.dataset.mode === 'agent') === !!s.agentMode));
+  const mode = approvalMode();
+  const btn = $('#btn-approval');
+  btn.className = `mode-btn ${mode}`;
+  btn.firstElementChild.innerHTML = icon(APPROVAL_MODES[mode].icon);
+  $('#approval-label').textContent = APPROVAL_MODES[mode].label;
+  btn.title = `Approvals: ${APPROVAL_MODES[mode].desc}`;
+  btn.classList.toggle('hidden', !s.agentMode);
+  renderStatusbar();
+}
+
+function renderStatusbar() {
+  $('#folder-name').textContent = state.ws ? state.ws.name : 'Open a folder';
+  $('#sb-folder-name').textContent = state.ws ? state.ws.root : 'No folder';
+  $('#sb-follow').classList.toggle('on', !!state.settings?.followAgent);
+  $('#sb-follow').title = state.settings?.followAgent
+    ? 'Follow Qwen is on: the editor opens files as Qwen reads and edits them. Click to turn off.'
+    : 'Follow Qwen is off. Click to open files in the editor as Qwen reads and edits them.';
+}
+
+function renderCursor() {
+  const model = editor?.getModel();
+  if (!model || !state.active) {
+    $('#sb-cursor').textContent = '';
+    $('#sb-lang').textContent = '';
+    return;
+  }
+  const pos = editor.getPosition();
+  $('#sb-cursor').textContent = pos ? `Ln ${pos.lineNumber}, Col ${pos.column}` : '';
+  const lang = monaco.languages.getLanguages().find((l) => l.id === model.getLanguageId());
+  $('#sb-lang').textContent = lang?.aliases?.[0] || model.getLanguageId();
+}
+
+let flashTimer = null;
+function flash(text) {
+  $('#sb-status').textContent = text;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => ($('#sb-status').textContent = ''), 3500);
+}
+
+function showApprovalMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const current = approvalMode();
+  const items = Object.entries(APPROVAL_MODES).map(([key, m]) => ({
+    label: m.label,
+    desc: m.desc,
+    icon: m.icon,
+    checked: key === current,
+    onClick: async () => {
+      state.settings = await api.setSettings({ approvalMode: key });
+      applySettingsToUi();
+      flash(`Approvals: ${m.label}`);
+    }
+  }));
+  showMenu(r.left, r.top, items, { above: true });
+}
+
+function showAttachMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  showMenu(r.left, r.top, [
+    { label: 'Attach a file…', icon: 'search', detail: 'Ctrl+Shift+A', onClick: () => openQuick('attach') },
+    state.active ? { label: `Attach open file (${baseName(state.active)})`, icon: 'paperclip', checked: state.attachCurrent, onClick: () => { state.attachCurrent = !state.attachCurrent; renderChips(); } } : null
+  ].filter(Boolean), { above: true });
 }
 
 function openSettings() {
   const s = state.settings;
   for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize', 'contextLength']) $(`#s-${k}`).value = s[k] ?? '';
-  for (const k of ['agentMode', 'includeCurrentFile', 'autoApproveEdits', 'autoApproveCommands']) $(`#s-${k}`).checked = !!s[k];
+  for (const k of ['agentMode', 'includeCurrentFile', 'followAgent']) $(`#s-${k}`).checked = !!s[k];
+  $('#s-approvalMode').value = approvalMode();
+  $('#s-allowedCommands').value = (s.allowedCommands || []).join(', ');
   $('#s-test-result').textContent = '';
   $('#settings-modal').classList.remove('hidden');
 }
 
 async function saveSettingsFromUi() {
   const patch = {};
-  for (const k of ['provider', 'baseUrl', 'apiKey', 'model']) patch[k] = $(`#s-${k}`).value.trim();
+  for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'approvalMode']) patch[k] = $(`#s-${k}`).value.trim();
   patch.temperature = parseFloat($('#s-temperature').value) || 0;
   patch.fontSize = parseInt($('#s-fontSize').value, 10) || 14;
   patch.contextLength = Math.max(2048, parseInt($('#s-contextLength').value, 10) || 32768);
-  for (const k of ['agentMode', 'includeCurrentFile', 'autoApproveEdits', 'autoApproveCommands']) patch[k] = $(`#s-${k}`).checked;
+  patch.allowedCommands = $('#s-allowedCommands').value.split(',').map((x) => x.trim()).filter(Boolean);
+  for (const k of ['agentMode', 'includeCurrentFile', 'followAgent']) patch[k] = $(`#s-${k}`).checked;
   state.settings = await api.setSettings(patch);
   $('#settings-modal').classList.add('hidden');
   applySettingsToUi();
@@ -1339,16 +2011,10 @@ async function fetchModels() {
   out.className = 'hint';
   out.textContent = 'Connecting…';
   // Save the connection fields first so the main process uses them.
-  await api.setSettings({ baseUrl: $('#s-baseUrl').value.trim(), apiKey: $('#s-apiKey').value.trim() });
+  await api.setSettings({ baseUrl: $('#s-baseUrl').value.trim(), apiKey: $('#s-apiKey').value.trim(), provider: $('#s-provider').value });
   try {
     const models = await api.listModels();
-    const dl = $('#model-list');
-    dl.innerHTML = '';
-    for (const m of models) {
-      const o = document.createElement('option');
-      o.value = m;
-      dl.append(o);
-    }
+    $('#model-list').replaceChildren(...models.map((m) => el('option', { value: m })));
     const qwen = models.filter((m) => /qwen/i.test(m));
     out.className = 'hint ok';
     out.textContent = `Connected ✓ ${models.length} models available${qwen.length ? `, Qwen: ${qwen.slice(0, 8).join(', ')}${qwen.length > 8 ? '…' : ''}` : ''}`;
@@ -1365,8 +2031,8 @@ async function checkConnection() {
   try {
     const models = await api.listModels();
     const found = models.includes(state.settings.model);
-    dot.className = 'dot ' + (found || !models.length ? 'ok' : 'bad');
-    $('#btn-model').title = found || !models.length ? `Connected to ${state.settings.baseUrl}` : `Model "${state.settings.model}" not found on server. Click to choose another.`;
+    dot.className = `dot ${found || !models.length ? 'ok' : 'bad'}`;
+    $('#btn-model').title = found || !models.length ? `Connected to ${state.settings.baseUrl}` : `Model "${state.settings.model}" not found on the server. Click to choose another.`;
   } catch (e) {
     dot.className = 'dot bad';
     $('#btn-model').title = `Not connected: ${e.message}`;
@@ -1374,8 +2040,31 @@ async function checkConnection() {
 }
 
 // ===================================================================
-// Misc UI
+// Menus, prompts, layout
 // ===================================================================
+function showMenu(x, y, items, { above } = {}) {
+  const menu = $('#ctx-menu');
+  menu.replaceChildren(...items.map((it) => {
+    if (it === '-') return el('div', { class: 'sep' });
+    return el('div', {
+      class: `mi${it.checked ? ' checked' : ''}${it.desc ? ' tall' : ''}`,
+      title: it.detail || '',
+      onclick: () => {
+        menu.classList.add('hidden');
+        it.onClick();
+      }
+    },
+    it.icon ? iconEl(it.icon) : null,
+    it.desc ? el('span', {}, el('span', { text: it.label }), el('span', { class: 'desc', text: it.desc })) : el('span', { text: it.label }),
+    it.detail && !it.desc ? el('span', { class: 'detail', text: it.detail }) : null);
+  }));
+  menu.classList.remove('hidden');
+  const w = menu.offsetWidth;
+  const h = menu.offsetHeight;
+  menu.style.left = `${Math.max(4, Math.min(x, innerWidth - w - 6))}px`;
+  menu.style.top = `${Math.max(4, above ? y - h - 6 : Math.min(y, innerHeight - h - 6))}px`;
+}
+
 let inputResolve = null;
 function askInput(title, placeholder = '') {
   $('#input-title').textContent = title;
@@ -1393,7 +2082,7 @@ function closeInput(v) {
 }
 
 function initSplitters() {
-  document.querySelectorAll('.splitter').forEach((sp) => {
+  $$('.splitter').forEach((sp) => {
     sp.addEventListener('mousedown', (e) => {
       e.preventDefault();
       const target = $('#' + sp.dataset.target);
@@ -1401,15 +2090,18 @@ function initSplitters() {
       const start = horizontal ? e.clientY : e.clientX;
       const startSize = horizontal ? target.offsetHeight : target.offsetWidth;
       sp.classList.add('dragging');
+      document.body.style.cursor = horizontal ? 'row-resize' : 'col-resize';
       const move = (ev) => {
         const delta = (horizontal ? ev.clientY : ev.clientX) - start;
-        if (horizontal) target.style.height = `${Math.max(80, startSize - delta)}px`;
-        else target.style.width = `${Math.max(150, sp.dataset.side === 'right' ? startSize - delta : startSize + delta)}px`;
+        if (horizontal) target.style.height = `${Math.max(90, startSize - delta)}px`;
+        else target.style.width = `${Math.max(170, sp.dataset.side === 'right' ? startSize - delta : startSize + delta)}px`;
       };
       const up = () => {
         sp.classList.remove('dragging');
+        document.body.style.cursor = '';
         removeEventListener('mousemove', move);
         removeEventListener('mouseup', up);
+        saveLayout();
       };
       addEventListener('mousemove', move);
       addEventListener('mouseup', up);
@@ -1417,17 +2109,93 @@ function initSplitters() {
   });
 }
 
+// Panel sizes are a per-machine convenience, so localStorage is fine (and optional).
+function saveLayout() {
+  try {
+    localStorage.setItem('qw.layout', JSON.stringify({
+      side: $('#sidepanel').style.width,
+      chat: $('#chat').style.width,
+      term: $('#terminal').style.height,
+      sideHidden: $('#sidepanel').classList.contains('hidden'),
+      view: state.view
+    }));
+  } catch {
+    /* storage unavailable */
+  }
+}
+function restoreLayout() {
+  let l = null;
+  try {
+    l = JSON.parse(localStorage.getItem('qw.layout') || 'null');
+  } catch {
+    /* ignore */
+  }
+  if (!l) return;
+  if (l.side) $('#sidepanel').style.width = l.side;
+  if (l.chat) $('#chat').style.width = l.chat;
+  if (l.term) $('#terminal').style.height = l.term;
+  if (l.view) showView(l.view);
+  if (l.sideHidden) {
+    $('#sidepanel').classList.add('hidden');
+    $$('.act[data-view]').forEach((b) => b.classList.remove('active'));
+  }
+}
+
+function autoGrow() {
+  const t = $('#prompt');
+  t.style.height = 'auto';
+  t.style.height = `${Math.min(260, t.scrollHeight)}px`;
+}
+
 function bindUi() {
-  $('#btn-open').onclick = pickWorkspace;
-  $('#welcome-open').onclick = pickWorkspace;
+  $('#btn-folder').onclick = (e) => showFolderMenu(e.currentTarget);
+  $('#sb-folder').onclick = (e) => showFolderMenu(e.currentTarget);
+  $('#btn-quick').onclick = () => openQuick('open');
+  $('#btn-settings').onclick = openSettings;
+  $('#act-settings').onclick = openSettings;
+  $('#btn-model').onclick = openSettings;
+  $$('.act[data-view]').forEach((b) => (b.onclick = () => showView(b.dataset.view, true)));
+  $('#act-terminal').onclick = () => showTerminal($('#terminal').classList.contains('hidden'));
+  $('#sb-terminal').onclick = () => showTerminal($('#terminal').classList.contains('hidden'));
+  $('#sb-follow').onclick = async () => {
+    state.settings = await api.setSettings({ followAgent: !state.settings.followAgent });
+    renderStatusbar();
+    flash(`Follow Qwen ${state.settings.followAgent ? 'on' : 'off'}`);
+  };
+
   $('#btn-new-file').onclick = () => newFile();
   $('#btn-new-folder').onclick = () => newFolder();
-  $('#btn-refresh').onclick = renderTree;
-  $('#btn-settings').onclick = openSettings;
-  $('#btn-model').onclick = openSettings;
-  $('#btn-terminal').onclick = () => showTerminal($('#terminal').classList.contains('hidden'));
+  $('#btn-refresh').onclick = () => {
+    state.fileIndex = null;
+    renderTree();
+  };
+  $('#btn-collapse').onclick = () => {
+    state.expanded = new Set(['.']);
+    renderTree();
+  };
+  $('#btn-revert-all').onclick = revertAll;
+
+  $('#search-input').oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 300);
+  };
+  $('#search-input').onkeydown = (e) => {
+    if (e.key === 'Enter') runSearch();
+  };
+  $('#search-regex').onclick = (e) => {
+    state.searchRegex = !state.searchRegex;
+    e.currentTarget.classList.toggle('on', state.searchRegex);
+    runSearch();
+  };
+
+  $('#review-layout').onclick = () => {
+    reviewSideBySide = !reviewSideBySide;
+    reviewEditor?.updateOptions({ renderSideBySide: reviewSideBySide });
+    $('#review-layout').innerHTML = icon(reviewSideBySide ? 'columns' : 'rows');
+  };
+
   $('#btn-term-close').onclick = () => showTerminal(false);
-  $('#btn-term-clear').onclick = () => ($('#term-out').innerHTML = '');
+  $('#btn-term-clear').onclick = () => $('#term-out').replaceChildren();
   $('#term-in').onkeydown = (e) => {
     if (e.key === 'Enter' && e.target.value.trim()) {
       const cmd = e.target.value.trim();
@@ -1439,16 +2207,21 @@ function bindUi() {
   $('#btn-new-chat').onclick = newChat;
   $('#btn-send').onclick = send;
   $('#btn-stop').onclick = stopChat;
-  $('#agent-toggle').onchange = async (e) => {
-    state.settings = await api.setSettings({ agentMode: e.target.checked });
-  };
+  $('#btn-attach').onclick = (e) => showAttachMenu(e.currentTarget);
+  $('#btn-approval').onclick = (e) => showApprovalMenu(e.currentTarget);
+  $$('#mode-seg button').forEach((b) => {
+    b.onclick = async () => {
+      state.settings = await api.setSettings({ agentMode: b.dataset.mode === 'agent' });
+      applySettingsToUi();
+    };
+  });
+  $('#prompt').oninput = autoGrow;
   $('#prompt').onkeydown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
     }
   };
-  $('#messages').replaceChildren(emptyState());
 
   $('#s-provider').onchange = (e) => {
     const p = PROVIDERS[e.target.value];
@@ -1458,54 +2231,100 @@ function bindUi() {
   $('#s-fetch-models').onclick = fetchModels;
   $('#s-save').onclick = saveSettingsFromUi;
   $('#s-cancel').onclick = () => $('#settings-modal').classList.add('hidden');
+  $('#s-close').onclick = () => $('#settings-modal').classList.add('hidden');
 
-  $('#diff-close').onclick = () => closeDiff(null);
+  $('#quick-input').oninput = () => {
+    state.quick.sel = 0;
+    renderQuick();
+  };
+  $('#quick-input').onkeydown = (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const n = state.quick.items.length;
+      if (n) state.quick.sel = (state.quick.sel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+      renderQuick();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      chooseQuick(state.quick.sel);
+    } else if (e.key === 'Escape') {
+      closeQuick();
+    }
+  };
+  $('#quick-modal').onmousedown = (e) => {
+    if (e.target.id === 'quick-modal') closeQuick();
+  };
+
   $('#input-form').onsubmit = (e) => {
     e.preventDefault();
     closeInput($('#input-value').value.trim());
   };
   $('#input-cancel').onclick = () => closeInput(null);
 
-  addEventListener('click', () => $('#ctx-menu').classList.add('hidden'));
+  addEventListener('mousedown', (e) => {
+    if (!e.target.closest('#ctx-menu')) $('#ctx-menu').classList.add('hidden');
+  });
   addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
     if (e.key === 'Escape') {
       $('#ctx-menu').classList.add('hidden');
       if (!$('#settings-modal').classList.contains('hidden')) $('#settings-modal').classList.add('hidden');
-      if (!$('#diff-modal').classList.contains('hidden')) closeDiff(null);
       if (!$('#input-modal').classList.contains('hidden')) closeInput(null);
+      if (!$('#quick-modal').classList.contains('hidden')) closeQuick();
+      return;
     }
-    if (mod && e.key.toLowerCase() === 'o') {
+    if (!mod) return;
+    if (key === 'o') {
       e.preventDefault();
       pickWorkspace();
-    }
-    if (mod && e.key.toLowerCase() === 's') {
+    } else if (key === 'p') {
+      e.preventDefault();
+      openQuick('open');
+    } else if (key === 's' && !e.shiftKey) {
       e.preventDefault();
       saveActive();
-    }
-    if (mod && e.key === '`') {
+    } else if (e.key === '`') {
       e.preventDefault();
       showTerminal($('#terminal').classList.contains('hidden'));
-    }
-    if (mod && e.key.toLowerCase() === 'l') {
+    } else if (key === 'l') {
       e.preventDefault();
       $('#prompt').focus();
-    }
-    if (mod && e.key.toLowerCase() === 'w' && state.active) {
+    } else if (key === 'b') {
       e.preventDefault();
-      closeTab(state.active);
+      showView(state.view, true);
+    } else if (key === 'f' && e.shiftKey) {
+      e.preventDefault();
+      showView('search');
+    } else if (key === 'e' && e.shiftKey) {
+      e.preventDefault();
+      showView('explorer');
+    } else if (key === 'a' && e.shiftKey) {
+      e.preventDefault();
+      openQuick('attach');
+    } else if (key === 'w') {
+      e.preventDefault();
+      if (state.review?.visible) closeReview();
+      else if (state.active) closeTab(state.active);
     }
   });
   addEventListener('beforeunload', (e) => {
-    if (state.tabs.some(isDirty)) {
-      e.returnValue = false;
-    }
+    if (state.tabs.some(isDirty)) e.returnValue = false;
   });
 }
 
+// ===================================================================
+// Helpers
+// ===================================================================
+function baseName(p) {
+  return String(p).split(/[\\/]/).filter(Boolean).pop() || p;
+}
+function parentDir(p) {
+  const i = p.lastIndexOf('/');
+  return i < 0 ? '.' : p.slice(0, i);
+}
+function joinPath(dir, name) {
+  return dir === '.' || !dir ? name : `${dir}/${name}`;
+}
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-}
-function escapeAttr(s) {
-  return escapeHtml(s);
 }

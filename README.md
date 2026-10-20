@@ -8,23 +8,35 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
 
 ## Features
 
-- **Explorer:** open any project folder; create, delete and reveal files.
-- **Editor:** Monaco with tabs, syntax highlighting and `Ctrl+S` to save.
+- **Follow Qwen:**
+  - The editor opens files as Qwen reads them.
+  - Edits Qwen makes stay highlighted in the editor.
+  - Edits that need your approval appear as a full-size diff with **Approve** / **Reject**.
+- **Changes panel:** every file Qwen created or edited this session, with added/removed line counts. Click one to see its diff, or revert it.
+- **Approval modes** (in the message box):
+  - **Ask:** approve every edit and command.
+  - **Auto-edit** (default): edits apply right away, and commands ask unless you've marked them "Always allow".
+  - **Full auto:** nothing asks.
+
+  Destructive commands such as `rm -rf`, `del /s` or `git push` always ask.
+- **Workspace:**
+  - Explorer, project search (`Ctrl+Shift+F`) and go to file (`Ctrl+P`).
+  - Monaco editor with tabs.
+  - Terminal panel.
+  - Home screen with quick actions and recent folders.
 - **Qwen chat:**
-  - Streams responses and shows Qwen's thinking in a collapsible block.
-  - Attaches the open file (and your selection) as context.
-  - Every code block gets **Copy**, **Insert at cursor** and **Apply to file** buttons. Apply shows a diff first.
-- **Agent mode:** Qwen can use these tools:
+  - Streaming answers with a collapsible thought process.
+  - Each tool call shows as one compact line ("Read main.c · 120 lines ✓"); click it to open the file or diff.
+  - Attaches the open file and your selection as context.
+  - Code blocks get **Copy**, **Insert** and **Apply** buttons.
+  - A context meter shows how full Qwen's memory is.
+- **Agent tools:**
   - `list_files`
   - `read_file`
   - `search_code`
   - `edit_file`
   - `write_file`
   - `run_command`
-
-  Edits show an inline diff (plus a full side-by-side diff view) and wait for **Approve / Reject**.
-- **Terminal panel:** run commands in your project folder (`cmd.exe` on Windows).
-- **Works with any OpenAI-compatible server:** presets for Ollama, LM Studio, Alibaba Cloud (DashScope) and OpenRouter.
 
 ## 1. Get a Qwen model running
 
@@ -78,10 +90,15 @@ GitHub Actions also builds the app on every push to `main`; the builds are under
 
 ## Tips
 
-- **Agent mode** (checkbox in the chat header) needs a model that supports tool calling. Qwen2.5-Coder, Qwen3 and Qwen3-Coder all do. If a model errors on tools, untick Agent and use plain chat. In plain chat, Qwen labels full-file code blocks with their path, so **Apply to file** still works.
-- Right-click a file in the explorer and choose **Add to chat** to attach it.
+- Switch between **Agent** and **Chat** below the message box. Agent mode needs a model that supports tool calling (Qwen2.5-Coder, Qwen3 and Qwen3-Coder all do). In Chat mode, Qwen labels full-file code blocks with their path, so **Apply** still works.
+- Turn **Follow Qwen** on or off in the status bar.
+- Manage always-allowed commands in **Settings → Agent**.
+- Right-click a file in the explorer and choose **Add to chat**, or press `Ctrl+Shift+A` to attach any file.
 - Keyboard shortcuts:
   - `Ctrl+O` open a folder
+  - `Ctrl+P` go to file
+  - `Ctrl+Shift+F` search
+  - `Ctrl+B` toggle the side panel
   - `Ctrl+S` save
   - `Ctrl+W` close the tab
   - `` Ctrl+` `` toggle the terminal
@@ -98,6 +115,7 @@ src/
   preload.js         Safe bridge exposed to the UI as window.api
   renderer/
     index.html       Layout
+    icons.js         Line icons and file-type badges
     styles.css       Dark theme
     app.js           Editor, explorer, chat, agent loop, diff view, terminal
 ```
