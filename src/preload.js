@@ -45,6 +45,11 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('ollama:pull-progress', fn);
   },
 
+  convList: (workspace) => ipcRenderer.invoke('conv:list', workspace),
+  convLoad: (id) => ipcRenderer.invoke('conv:load', id),
+  convSave: (conv) => ipcRenderer.invoke('conv:save', conv),
+  convDelete: (id) => ipcRenderer.invoke('conv:delete', id),
+
   listModels: () => ipcRenderer.invoke('model:list'),
   chatStream: (id, payload) => ipcRenderer.invoke('chat:stream', id, payload),
   chatAbort: (id) => ipcRenderer.invoke('chat:abort', id),

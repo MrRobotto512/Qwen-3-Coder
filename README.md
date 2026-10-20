@@ -8,6 +8,11 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
 
 ## Features
 
+- **Conversations & task history:**
+  - Every conversation or agent task is saved per project.
+  - The **History** panel lists them by Today / Yesterday / Earlier, with status (running, needs approval, done, failed, stopped) and how many files each changed. Search, rename or delete them.
+  - Reopen any of them to see the full transcript and keep going; Qwen remembers the earlier messages.
+  - Start a **new conversation** (`Ctrl+N`) while another task keeps running in the background. A badge and the "needs you" pill show when a background task is waiting for approval.
 - **Models for this PC:**
   - Detects your GPU, VRAM, RAM and CPU.
   - Rates each Qwen model as fast (fits in GPU memory), usable (partly on CPU), slow, or too large, and picks a context window that fits.
@@ -22,7 +27,7 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - The editor opens files as Qwen reads them.
   - Edits Qwen makes stay highlighted in the editor.
   - Edits that need your approval appear as a full-size diff with **Approve** / **Reject**.
-- **Changes panel:** every file Qwen created or edited this session, with added/removed line counts. Click one to see its diff, or revert it.
+- **Changes panel:** every file the current conversation created or edited, with added/removed line counts. Click one to see its diff, or revert it. Reverting only undoes that conversation's changes.
 - **Approval modes** (in the message box):
   - **Ask:** approve every edit and command.
   - **Auto-edit** (default): edits apply right away, and commands ask unless you've marked them "Always allow".
@@ -116,6 +121,8 @@ Installed copies pick it up within six hours, or right away through **Settings â
 - Manage always-allowed commands in **Settings â†’ Agent**.
 - Right-click a file in the explorer and choose **Add to chat**, or press `Ctrl+Shift+A` to attach any file.
 - Keyboard shortcuts:
+  - `Ctrl+N` new conversation
+  - `Ctrl+Shift+H` history
   - `Ctrl+O` open a folder
   - `Ctrl+P` go to file
   - `Ctrl+Shift+F` search
@@ -126,7 +133,7 @@ Installed copies pick it up within six hours, or right away through **Settings â
   - `Ctrl+L` focus the chat
   - `F12` open DevTools
 - Qwen can only touch files inside the open project folder.
-- Settings are stored in `%APPDATA%\qwen-workspace\settings.json`.
+- Settings are stored in `%APPDATA%\qwen-workspace\settings.json`, and conversations in `%APPDATA%\qwen-workspace\conversations\`.
 
 ## Project layout
 

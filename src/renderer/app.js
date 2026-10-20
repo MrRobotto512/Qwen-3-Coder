@@ -46,16 +46,11 @@ const state = {
   selectedDir: '.',
   expanded: new Set(['.']),
   view: 'explorer',
-  history: [], // OpenAI-format messages (without the system prompt)
-  busy: false,
-  stopRequested: false,
-  currentChatId: null,
+  conv: null, // the conversation on screen (see createConv)
+  convs: new Map(), // id -> loaded or running conversations
+  convList: [], // saved conversation summaries for this workspace
   attachCurrent: true,
-  changes: new Map(), // path -> { original: string|null, added, removed }
-  notes: [], // things to tell Qwen with the next message (e.g. reverts)
-  review: null, // { path, original, modified, pending, visible, title }
-  pendingApproval: null, // { finish(bool), cancelOnClose }
-  lastUsage: null,
+  review: null, // { path, original, modified, pending, visible, title, onDecide, cancelOnClose }
   fileIndex: null,
   searchRegex: false,
   quick: { mode: 'open', items: [], sel: 0 },
@@ -155,14 +150,16 @@ function renderAll() {
   renderChanges();
   renderChips();
   renderStatusbar();
-  if (!state.history.length) renderChatEmpty();
+  renderHistory();
 }
 
 // ===================================================================
 // Workspace
 // ===================================================================
 async function openWorkspace(dir, silent) {
-  if (state.busy) stopChat();
+  const running = [...state.convs.values()].filter((c) => c.busy);
+  if (running.length && !confirm(`${running.length} task${running.length === 1 ? ' is' : 's are'} still running in this folder. Stop and switch folders?`)) return;
+  running.forEach((c) => stopChat(c));
   const ws = await api.setWorkspace(dir);
   if (!ws) {
     if (!silent) alert(`Could not open folder:\n${dir}`);
@@ -176,14 +173,13 @@ async function openWorkspace(dir, silent) {
     expanded: new Set(['.']),
     selectedDir: '.',
     fileIndex: null,
-    notes: []
+    conv: null
   });
-  state.changes.clear();
   closeReview(true);
   state.settings = await api.getSettings();
   $('#term-shell').textContent = ws.platform === 'win32' ? '· cmd.exe' : '· sh';
   $('#term-out').innerHTML = '';
-  newChat();
+  await loadConversations();
   renderAll();
 }
 
@@ -234,7 +230,7 @@ async function fillDir(ul, dirPath, depth) {
   }
   for (const entry of entries) {
     const open = entry.dir && state.expanded.has(entry.path);
-    const ch = state.changes.get(entry.path);
+    const ch = state.conv?.changes.get(entry.path);
     const row = el(
       'div',
       {
@@ -423,29 +419,32 @@ function escapeRegex(s) {
 }
 
 // ---------- changes made by Qwen ----------
-function recordChange(path, before, after) {
-  const prev = state.changes.get(path);
+// Changes belong to the conversation that made them, so reverting undoes just that task.
+function recordChange(c, path, before, after) {
+  const prev = c.changes.get(path);
   const original = prev ? prev.original : before;
   if (original !== null && original === after) {
-    state.changes.delete(path);
+    c.changes.delete(path);
   } else {
-    state.changes.set(path, { original, ...diffStats(original ?? '', after) });
+    c.changes.set(path, { original, ...diffStats(original ?? '', after) });
   }
-  renderChanges();
+  if (c === state.conv) renderChanges();
+  saveConv(c);
 }
 
 function renderChanges() {
-  const n = state.changes.size;
+  const changes = state.conv?.changes || new Map();
+  const n = changes.size;
   const badge = $('#changes-badge');
   badge.textContent = String(n);
   badge.classList.toggle('hidden', !n);
   $('#btn-revert-all').classList.toggle('hidden', !n);
   const list = $('#changes-list');
   if (!n) {
-    list.replaceChildren(el('div', { class: 'empty-note', text: 'Files Qwen creates or edits in this session show up here. Click one to see the diff, or revert it.' }));
+    list.replaceChildren(el('div', { class: 'empty-note', text: 'Files Qwen creates or edits in this conversation show up here. Click one to see the diff, or revert it.' }));
     return;
   }
-  list.replaceChildren(...[...state.changes].map(([path, ch]) => changeItem(path, ch)));
+  list.replaceChildren(...[...changes].map(([path, ch]) => changeItem(path, ch)));
 }
 
 function changeItem(path, ch) {
@@ -469,7 +468,7 @@ function statsHtml({ added, removed }) {
 }
 
 async function openChangeReview(path) {
-  const ch = state.changes.get(path);
+  const ch = state.conv?.changes.get(path);
   if (!ch) return openFile(path);
   let current = '';
   try {
@@ -481,7 +480,8 @@ async function openChangeReview(path) {
 }
 
 async function revertChange(path, ask = true) {
-  const ch = state.changes.get(path);
+  const c = state.conv;
+  const ch = c?.changes.get(path);
   if (!ch) return;
   const what = ch.original === null ? `delete ${path} (Qwen created it)` : `restore ${path} to how it was before Qwen changed it`;
   if (ask && !confirm(`Revert: ${what}?`)) return;
@@ -499,8 +499,9 @@ async function revertChange(path, ask = true) {
     alert(`Could not revert ${path}: ${e.message}`);
     return;
   }
-  state.changes.delete(path);
-  state.notes.push(`The user reverted your changes to ${path}${ch.original === null ? ' (the file was deleted)' : ''}.`);
+  c.changes.delete(path);
+  c.notes.push(`The user reverted your changes to ${path}${ch.original === null ? ' (the file was deleted)' : ''}.`);
+  saveConv(c);
   if (state.review && !state.review.pending && state.review.path === path) closeReview(true);
   renderChanges();
   renderTree();
@@ -509,9 +510,10 @@ async function revertChange(path, ask = true) {
 }
 
 async function revertAll() {
-  const n = state.changes.size;
-  if (!n || !confirm(`Revert all ${n} files Qwen changed in this session?`)) return;
-  for (const path of [...state.changes.keys()]) await revertChange(path, false);
+  const changes = state.conv?.changes;
+  const n = changes?.size;
+  if (!n || !confirm(`Revert all ${n} files Qwen changed in this conversation?`)) return;
+  for (const path of [...changes.keys()]) await revertChange(path, false);
 }
 
 // ===================================================================
@@ -691,7 +693,7 @@ function languageForPath(path) {
   return monaco.languages.getLanguages().find((l) => l.extensions?.includes(ext) || l.filenames?.map((f) => f.toLowerCase()).includes(name))?.id || 'plaintext';
 }
 
-function openReview({ path, original, modified, pending, title }) {
+function openReview({ path, original, modified, pending, title, onDecide, cancelOnClose }) {
   if (!reviewEditor) {
     reviewEditor = monaco.editor.createDiffEditor($('#review-editor'), {
       theme: 'qwen-dark',
@@ -718,20 +720,20 @@ function openReview({ path, original, modified, pending, title }) {
   old?.original.dispose();
   old?.modified.dispose();
 
-  state.review = { path, original, modified, pending, visible: true, title: title || path };
+  state.review = { path, original, modified, pending, visible: true, title: title || path, onDecide, cancelOnClose };
   $('#review-title').textContent = state.review.title;
   $('#review-stats').innerHTML = statsHtml(diffStats(original ?? '', modified));
   $('.review-bar').classList.toggle('pending', !!pending);
   const actions = $('#review-actions');
   if (pending) {
     actions.replaceChildren(
-      el('button', { class: 'ghost danger-text', onclick: () => state.pendingApproval?.finish(false) }, 'Reject'),
-      el('button', { class: 'primary', onclick: () => state.pendingApproval?.finish(true) }, iconEl('check'), 'Approve')
+      el('button', { class: 'ghost danger-text', onclick: () => state.review?.onDecide?.(false) }, 'Reject'),
+      el('button', { class: 'primary', onclick: () => state.review?.onDecide?.(true) }, iconEl('check'), 'Approve')
     );
   } else {
     actions.replaceChildren(
       el('button', { class: 'ghost', onclick: () => openFile(path) }, iconEl('file'), 'Open file'),
-      state.changes.has(path) ? el('button', { class: 'ghost', onclick: () => revertChange(path) }, iconEl('undo'), 'Revert') : null
+      state.conv?.changes.has(path) ? el('button', { class: 'ghost', onclick: () => revertChange(path) }, iconEl('undo'), 'Revert') : null
     );
   }
   renderTabs();
@@ -747,8 +749,8 @@ function showReview() {
 
 function closeReview(force) {
   if (!state.review) return;
-  if (!force && state.review.pending && state.pendingApproval?.cancelOnClose) {
-    state.pendingApproval.finish(false);
+  if (!force && state.review.pending && state.review.cancelOnClose) {
+    state.review.onDecide?.(false);
     return;
   }
   state.review = null;
@@ -803,9 +805,10 @@ function renderHome() {
           ...QUICK_ACTIONS.map((a) => el('button', { class: 'action-card', onclick: () => setPrompt(a.prompt, !a.fill) },
             iconEl(a.icon), el('span', { class: 't', text: a.title }), el('span', { class: 'd', text: a.desc })))))
     );
-    if (state.changes.size) {
-      inner.append(el('div', { class: 'home-section' }, el('h3', { text: `Changed by Qwen (${state.changes.size})` }),
-        ...[...state.changes].map(([p, ch]) => changeItem(p, ch))));
+    const changes = state.conv?.changes;
+    if (changes?.size) {
+      inner.append(el('div', { class: 'home-section' }, el('h3', { text: `Changed in this conversation (${changes.size})` }),
+        ...[...changes].map(([p, ch]) => changeItem(p, ch))));
     }
     inner.append(
       el('div', { class: 'home-tips' },
@@ -1077,7 +1080,7 @@ async function allowCommandPrefix(prefix) {
 }
 
 // ---------- tool execution ----------
-async function executeTool(call, row) {
+async function executeTool(c, call, row) {
   const name = call.function.name;
   let args;
   try {
@@ -1085,7 +1088,8 @@ async function executeTool(call, row) {
   } catch {
     return { result: `Error: arguments were not valid JSON: ${call.function.arguments.slice(0, 300)}` };
   }
-  const follow = state.settings.followAgent;
+  // Only the conversation on screen moves the editor around.
+  const follow = state.settings.followAgent && c === state.conv;
   try {
     switch (name) {
       case 'list_files': {
@@ -1126,7 +1130,7 @@ async function executeTool(call, row) {
         const original = exists ? findTab(p)?.model.getValue() ?? (await api.read(p)) : '';
         if (exists && original === content) return { result: 'File already has exactly this content; nothing changed.', meta: 'no change' };
         row.setVerb(exists ? 'Rewrite' : 'Create');
-        return applyAgentEdit(row, p, exists ? original : null, content, exists ? `Rewrite ${p}` : `Create ${p}`);
+        return applyAgentEdit(c, row, p, exists ? original : null, content, exists ? `Rewrite ${p}` : `Create ${p}`);
       }
       case 'edit_file': {
         const p = normPath(args.path);
@@ -1142,7 +1146,7 @@ async function executeTool(call, row) {
         if (count === 0) return { result: `Error: old_text was not found in ${p}. Read the file again and copy the exact text, including whitespace.` };
         if (count > 1) return { result: `Error: old_text matches ${count} places in ${p}. Include more surrounding lines so it is unique.` };
         const modified = original.replace(oldText, () => newText);
-        return applyAgentEdit(row, p, original, modified, `Edit ${p}`);
+        return applyAgentEdit(c, row, p, original, modified, `Edit ${p}`);
       }
       case 'run_command': {
         const cmd = String(args.command || '').trim();
@@ -1153,7 +1157,7 @@ async function executeTool(call, row) {
         }
         showTerminal(true, false);
         termWrite(`\n❯ ${cmd}  (Qwen)\n`, 'term-cmd');
-        setActivity(`Running ${cmd}`);
+        setActivity(c, `Running ${cmd}`);
         const r = await api.runCommand(cmd);
         termWrite(`[exit code ${r.code}]\n`, 'term-exit');
         row.setBody(r.output || '(no output)');
@@ -1170,7 +1174,7 @@ async function executeTool(call, row) {
 }
 
 // Shared by write_file and edit_file. `before` is null for a new file.
-async function applyAgentEdit(row, p, before, after, title) {
+async function applyAgentEdit(c, row, p, before, after, title) {
   const stats = diffStats(before ?? '', after);
   row.setDiffBody(unifiedDiff(before ?? '', after));
   if (needsApproval('edit')) {
@@ -1179,17 +1183,17 @@ async function applyAgentEdit(row, p, before, after, title) {
   }
   await api.write(p, after);
   syncOpenTab(p, after);
-  recordChange(p, before, after);
+  recordChange(c, p, before, after);
   if (before === null) {
     expandTo(p);
     state.fileIndex = null;
   }
   renderTree();
-  if (state.settings.followAgent) {
+  if (state.settings.followAgent && c === state.conv) {
     await openFile(p, { preview: true, focus: false });
     highlightChanges(p, before, after);
   }
-  row.onTarget(() => openChangeReview(p));
+  row.linkToChange(p);
   const verb = before === null ? 'Created' : 'Edited';
   return { result: `${verb} ${p} (${after.split('\n').length} lines, +${stats.added} −${stats.removed}).`, metaHtml: statsHtml(stats) };
 }
@@ -1302,35 +1306,311 @@ function extractTextToolCalls(content) {
 }
 
 // ===================================================================
-// Chat: conversation loop
+// Conversations
 // ===================================================================
-function newChat() {
-  if (state.busy) stopChat();
-  state.history = [];
-  state.lastUsage = null;
-  $('#chat-title').textContent = 'New chat';
-  renderChatEmpty();
-  updateCtxMeter();
-  setActivity('');
+// Each conversation keeps its own transcript, model history, file changes and run state, and
+// renders into its own container, so a task can keep running while another one is on screen.
+// `display` is the saved transcript the UI is rebuilt from; `history` is what Qwen sees.
+function createConv() {
+  return {
+    id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    title: 'New chat',
+    workspace: state.ws?.root || null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'idle', // idle | running | waiting | done | error | stopped
+    model: state.settings.model,
+    mode: state.settings.agentMode ? 'agent' : 'chat',
+    history: [],
+    display: [],
+    changes: new Map(), // path -> { original: string|null, added, removed }
+    notes: [], // things to tell Qwen with the next message (e.g. reverts)
+    usage: null,
+    busy: false,
+    stopRequested: false,
+    chatId: null,
+    pendingApproval: null,
+    activity: '',
+    container: el('div', { class: 'conv-log' })
+  };
 }
 
-function renderChatEmpty() {
+function convStatus(c) {
+  if (c.busy) return c.pendingApproval ? 'waiting' : 'running';
+  return c.status;
+}
+
+function serializeConv(c) {
+  return {
+    id: c.id,
+    title: c.title,
+    workspace: c.workspace,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    status: convStatus(c),
+    model: c.model,
+    mode: c.mode,
+    history: c.history,
+    display: c.display,
+    changes: [...c.changes],
+    notes: c.notes,
+    usage: c.usage
+  };
+}
+
+function convSummary(c) {
+  return {
+    id: c.id,
+    title: c.title,
+    workspace: c.workspace,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    status: convStatus(c),
+    model: c.model,
+    mode: c.mode,
+    changes: c.changes.size,
+    messages: c.display.filter((d) => d.t === 'user').length
+  };
+}
+
+// Saves shortly after the last change, so a burst of tool calls is one write.
+function saveConv(c, now) {
+  if (!c.display.length || !c.workspace) return;
+  clearTimeout(c.saveTimer);
+  const write = async () => {
+    try {
+      const summary = await api.convSave(serializeConv(c));
+      const i = state.convList.findIndex((x) => x.id === c.id);
+      if (i >= 0) state.convList[i] = summary;
+      else state.convList.unshift(summary);
+      renderHistory();
+    } catch (e) {
+      flash(`Couldn't save the conversation: ${cleanError(e)}`);
+    }
+  };
+  if (now) write();
+  else c.saveTimer = setTimeout(write, 400);
+}
+
+async function loadConversations() {
+  state.convs.clear();
+  state.convList = state.ws ? await api.convList(state.ws.root) : [];
+  const lastId = state.ws && state.settings.lastConversations?.[state.ws.root];
+  if (lastId && state.convList.some((c) => c.id === lastId)) await openConv(lastId);
+  else newChat();
+  renderHistory();
+}
+
+async function openConv(id) {
+  let c = state.convs.get(id);
+  if (!c) {
+    let data;
+    try {
+      data = await api.convLoad(id);
+    } catch (e) {
+      flash(`Couldn't open that conversation: ${cleanError(e)}`);
+      return;
+    }
+    c = Object.assign(createConv(), data, {
+      changes: new Map(data.changes || []),
+      // A task that was running when the app closed can't still be running.
+      status: ['running', 'waiting'].includes(data.status) ? 'stopped' : data.status
+    });
+    renderTranscript(c);
+    state.convs.set(id, c);
+  }
+  switchConv(c);
+}
+
+function newChat() {
+  if (state.conv && !state.conv.display.length && !state.conv.busy) {
+    renderChatEmpty(state.conv);
+    switchConv(state.conv);
+  } else {
+    const c = createConv();
+    state.convs.set(c.id, c);
+    renderChatEmpty(c);
+    switchConv(c);
+  }
+  $('#prompt').focus();
+}
+
+function switchConv(c) {
+  state.conv = c;
+  $('#messages').replaceChildren(c.container);
+  $('#chat-title').textContent = c.title;
+  $('#chat-title').title = c.title;
+  renderRunControls();
+  updateCtxMeter();
+  renderChanges();
+  renderTree();
+  renderCenter();
+  renderHistory();
+  scrollChat(c, true);
+  if (state.ws && c.display.length) {
+    state.settings.lastConversations = { ...(state.settings.lastConversations || {}), [state.ws.root]: c.id };
+    api.setSettings({ lastConversations: state.settings.lastConversations });
+  }
+}
+
+function renderChatEmpty(c) {
   const suggestions = [
     ['book', 'Explain this project', "Give me an overview of this project: what it does, how it's structured, and how to build and run it."],
     ['eye', 'Review the open file', 'Review the open file for bugs and suggest improvements.'],
     ['bug', 'Fix a bug…', 'Find and fix this bug: ', true],
     ['wand', 'Add a feature…', 'Add this feature: ', true]
   ];
-  $('#messages').replaceChildren(
+  c.container.replaceChildren(
     el('div', { class: 'chat-empty' },
       el('span', { class: 'logo', text: 'Q' }),
       el('h2', { text: state.ws ? `What should we do in ${state.ws.name}?` : 'What are we building?' }),
-      el('p', { text: state.ws ? 'Qwen can read, search and edit this project.' : 'Open a folder so Qwen can work with your files.' }),
+      el('p', { text: state.ws ? 'Start a task or ask a question. Past conversations are under History.' : 'Open a folder so Qwen can work with your files.' }),
       el('div', { class: 'suggestions' }, ...suggestions.map(([ic, label, prompt, fill]) =>
-        el('button', { onclick: () => setPrompt(prompt, !fill) }, iconEl(ic), label))))
+        el('button', { onclick: () => setPrompt(prompt, !fill) }, iconEl(ic), label))),
+      state.convList.length
+        ? el('button', { class: 'ghost recent-link', onclick: () => showView('history') }, iconEl('history'), `${state.convList.length} past conversation${state.convList.length === 1 ? '' : 's'}`)
+        : null)
   );
 }
 
+// Rebuilds a saved conversation's transcript from its display log.
+function renderTranscript(c) {
+  c.container.replaceChildren();
+  for (const item of c.display) {
+    if (item.t === 'user') renderUserMessage(c, item.text, item.attached || []);
+    else if (item.t === 'error') renderError(c, item.text);
+    else if (item.t === 'assistant') {
+      const view = addAssistantMessage(c, item);
+      view.setFinal(item.content || '', item.reasoning || '');
+      view.finish(item.hasCalls);
+      for (const step of item.steps || []) view.addStep(step.call, step).restore();
+    }
+  }
+  if (!c.display.length) renderChatEmpty(c);
+}
+
+async function renameConv(id) {
+  const meta = state.convs.get(id) || state.convList.find((x) => x.id === id);
+  const title = await askInput('Rename conversation', '', meta?.title || '');
+  if (!title) return;
+  const c = state.convs.get(id) || (await openConvQuiet(id));
+  if (!c) return;
+  c.title = title;
+  if (c === state.conv) $('#chat-title').textContent = title;
+  saveConv(c, true);
+}
+
+// Loads a conversation without showing it (used for renaming from the list).
+async function openConvQuiet(id) {
+  try {
+    const data = await api.convLoad(id);
+    const c = Object.assign(createConv(), data, { changes: new Map(data.changes || []) });
+    renderTranscript(c);
+    state.convs.set(id, c);
+    return c;
+  } catch {
+    return null;
+  }
+}
+
+async function deleteConv(id) {
+  const c = state.convs.get(id);
+  if (c?.busy) return alert('Stop this task before deleting it.');
+  const meta = c || state.convList.find((x) => x.id === id);
+  if (!confirm(`Delete "${meta?.title || 'this conversation'}"? Files it changed stay as they are.`)) return;
+  await api.convDelete(id);
+  state.convs.delete(id);
+  state.convList = state.convList.filter((x) => x.id !== id);
+  if (state.conv?.id === id) {
+    state.conv = null;
+    newChat();
+  }
+  renderHistory();
+}
+
+const STATUS_INFO = {
+  running: { icon: null, label: 'Running' },
+  waiting: { icon: 'alert', label: 'Needs your approval' },
+  done: { icon: 'check', label: 'Done' },
+  error: { icon: 'x', label: 'Failed' },
+  stopped: { icon: 'stop', label: 'Stopped' },
+  idle: { icon: 'chat', label: '' }
+};
+
+function relativeTime(ts) {
+  const s = (Date.now() - ts) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  const d = Math.floor(s / 86400);
+  return d < 7 ? `${d}d ago` : new Date(ts).toLocaleDateString();
+}
+
+function dayGroup(ts) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const day = 86400000;
+  if (ts >= start.getTime()) return 'Today';
+  if (ts >= start.getTime() - day) return 'Yesterday';
+  if (ts >= start.getTime() - 7 * day) return 'Previous 7 days';
+  return 'Older';
+}
+
+function renderHistory() {
+  const list = $('#history-list');
+  if (!list) return;
+  // Live conversations override their saved summaries (status, title, time).
+  const byId = new Map(state.convList.map((m) => [m.id, m]));
+  for (const c of state.convs.values()) {
+    if (c.display.length) byId.set(c.id, { ...byId.get(c.id), ...convSummary(c) });
+  }
+  const q = $('#history-search').value.trim().toLowerCase();
+  const items = [...byId.values()].filter((m) => !q || m.title.toLowerCase().includes(q)).sort((a, b) => b.updatedAt - a.updatedAt);
+
+  const active = [...state.convs.values()].filter((c) => c.busy);
+  const badge = $('#history-badge');
+  badge.textContent = String(active.length);
+  badge.classList.toggle('hidden', !active.length);
+  badge.classList.toggle('warn', active.some((c) => c.pendingApproval));
+  const others = active.filter((c) => c !== state.conv);
+  const pill = $('#chat-running');
+  pill.classList.toggle('hidden', !others.length);
+  pill.classList.toggle('warn', others.some((c) => c.pendingApproval));
+  pill.lastChild.textContent = others.some((c) => c.pendingApproval) ? `${others.length} need${others.length === 1 ? 's' : ''} you` : `${others.length} running`;
+
+  if (!state.ws) {
+    list.replaceChildren(el('div', { class: 'empty-note', text: 'Open a folder to see its conversations.' }));
+    return;
+  }
+  if (!items.length) {
+    list.replaceChildren(el('div', { class: 'empty-note', text: q ? 'No matching conversations.' : 'Conversations and agent tasks you start in this project are saved here.' }));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  let group = null;
+  for (const m of items) {
+    const g = dayGroup(m.updatedAt);
+    if (g !== group) {
+      group = g;
+      frag.append(el('div', { class: 'h-group', text: g }));
+    }
+    const st = STATUS_INFO[m.status] || STATUS_INFO.idle;
+    const sub = [relativeTime(m.updatedAt), m.mode === 'chat' ? 'Chat' : 'Agent', m.changes ? `${m.changes} file${m.changes === 1 ? '' : 's'} changed` : null].filter(Boolean).join(' · ');
+    frag.append(
+      el('div', { class: `h-item${m.id === state.conv?.id ? ' active' : ''} st-${m.status}`, title: `${m.title}${st.label ? `\n${st.label}` : ''}`, onclick: () => openConv(m.id) },
+        el('span', { class: 'h-status' }, st.icon ? iconEl(st.icon) : el('span', { class: 'spinner' })),
+        el('div', { class: 'h-main' }, el('div', { class: 'h-title', text: m.title }), el('div', { class: 'h-sub', text: sub })),
+        el('span', { class: 'h-acts' },
+          el('button', { class: 'icon-btn', title: 'Rename', onclick: (e) => { e.stopPropagation(); renameConv(m.id); } }, iconEl('pencil')),
+          el('button', { class: 'icon-btn', title: 'Delete', onclick: (e) => { e.stopPropagation(); deleteConv(m.id); } }, iconEl('trash'))))
+    );
+  }
+  list.replaceChildren(frag);
+}
+
+// ===================================================================
+// Chat: conversation loop
+// ===================================================================
 function setPrompt(text, sendNow) {
   const input = $('#prompt');
   input.value = text;
@@ -1341,41 +1621,59 @@ function setPrompt(text, sendNow) {
 }
 
 async function send() {
+  const c = state.conv;
   const input = $('#prompt');
   const text = input.value.trim();
-  if (!text || state.busy) return;
+  if (!text || c.busy) return;
   input.value = '';
   autoGrow();
-  $('#messages .chat-empty')?.remove();
-  if (!state.history.length) $('#chat-title').textContent = text.length > 60 ? text.slice(0, 57) + '…' : text;
+  c.container.querySelector('.chat-empty')?.remove();
+  if (!c.display.length) {
+    c.title = text.length > 70 ? text.slice(0, 67) + '…' : text;
+    c.workspace = state.ws?.root || null;
+    $('#chat-title').textContent = c.title;
+  }
+  c.mode = state.settings.agentMode ? 'agent' : 'chat';
+  c.model = state.settings.model;
 
   const att = await buildAttachments();
   renderChips();
-  addUserMessage(text, att.names);
+  addUserMessage(c, text, att.names);
   let content = text;
-  if (state.notes.length) {
-    content = `(Note: ${state.notes.join(' ')})\n\n${content}`;
-    state.notes = [];
+  if (c.notes.length) {
+    content = `(Note: ${c.notes.join(' ')})\n\n${content}`;
+    c.notes = [];
   }
   if (att.text) content += `\n\n---\nAttached context:\n${att.text}`;
-  state.history.push({ role: 'user', content });
+  c.history.push({ role: 'user', content });
+  if (state.ws) {
+    state.settings.lastConversations = { ...(state.settings.lastConversations || {}), [state.ws.root]: c.id };
+    api.setSettings({ lastConversations: state.settings.lastConversations });
+  }
 
-  setBusy(true);
+  setBusy(c, true);
+  let failed = false;
   try {
-    await runConversation();
+    failed = await runConversation(c);
+  } catch (e) {
+    failed = true;
+    addError(c, `Something went wrong: ${cleanError(e)}`);
   } finally {
-    setBusy(false);
+    c.status = c.stopRequested ? 'stopped' : failed ? 'error' : 'done';
+    setBusy(c, false);
+    saveConv(c, true);
   }
 }
 
-async function runConversation() {
+// Runs model turns and tool calls until Qwen stops calling tools. Returns true on failure.
+async function runConversation(c) {
   const useTools = state.settings.agentMode && !!state.ws;
   for (let step = 0; step < MAX_AGENT_STEPS; step++) {
-    if (state.stopRequested) break;
-    const view = addAssistantMessage();
-    const id = `c${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
-    state.currentChatId = id;
-    setActivity(step === 0 ? 'Thinking' : 'Working');
+    if (c.stopRequested) return false;
+    const view = addAssistantMessage(c);
+    const id = `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+    c.chatId = id;
+    setActivity(c, step === 0 ? 'Thinking' : 'Working');
 
     const off = api.onChatEvent((ev) => {
       if (ev.id !== id) return;
@@ -1383,30 +1681,30 @@ async function runConversation() {
       else if (ev.type === 'reasoning') view.appendReasoning(ev.data);
     });
     const res = await api.chatStream(id, {
-      messages: [{ role: 'system', content: systemPrompt() }, ...state.history],
+      messages: [{ role: 'system', content: systemPrompt() }, ...c.history],
       tools: useTools ? TOOLS : undefined
     });
     // IPC events and the invoke reply travel on separate channels, so late deltas can
     // arrive after this resolves. The reply carries the full text; use it as the final state.
     off();
-    state.currentChatId = null;
+    c.chatId = null;
     if (res.ok && !res.aborted) view.setFinal(res.content || '', res.reasoning || '');
     if (res.usage?.promptTokens && res.usage.contextLength) {
-      state.lastUsage = res.usage;
-      updateCtxMeter();
+      c.usage = res.usage;
+      if (c === state.conv) updateCtxMeter();
       if (res.usage.promptTokens >= res.usage.contextLength * 0.95) {
-        addError(`The conversation (${res.usage.promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${res.usage.contextLength.toLocaleString()}), so the oldest messages — including your instructions — were cut off. Raise "Context window" in Settings or start a new chat.`);
+        addError(c, `The conversation (${res.usage.promptTokens.toLocaleString()} tokens) has filled Qwen's context window (${res.usage.contextLength.toLocaleString()}), so the oldest messages — including your instructions — were cut off. Raise "Context window" in Settings or start a new chat.`);
       }
     }
 
     if (!res.ok) {
       view.finish(false);
-      addError(res.error, useTools);
-      break;
+      addError(c, res.error, useTools);
+      return true;
     }
     if (res.aborted) {
       view.finish(false);
-      break;
+      return false;
     }
 
     let content = res.content || '';
@@ -1421,47 +1719,64 @@ async function runConversation() {
 
     const msg = { role: 'assistant', content: stripThink(content) };
     if (calls.length) msg.tool_calls = calls;
-    state.history.push(msg);
-    if (!calls.length) break;
+    c.history.push(msg);
+    saveConv(c);
+    if (!calls.length) return false;
 
     for (const call of calls) {
-      if (state.stopRequested) {
-        state.history.push({ role: 'tool', tool_call_id: call.id, content: 'Cancelled by the user.' });
+      if (c.stopRequested) {
+        c.history.push({ role: 'tool', tool_call_id: call.id, content: 'Cancelled by the user.' });
         continue;
       }
       const row = view.addStep(call);
-      setActivity(`${row.doing} ${row.target}`);
-      const out = await executeTool(call, row);
+      setActivity(c, `${row.doing} ${row.target}`);
+      const out = await executeTool(c, call, row);
       row.done(out);
-      state.history.push({ role: 'tool', tool_call_id: call.id, content: out.result });
+      c.history.push({ role: 'tool', tool_call_id: call.id, content: out.result });
+      saveConv(c);
     }
-    if (step === MAX_AGENT_STEPS - 1) addError(`Stopped after ${MAX_AGENT_STEPS} steps. Send a message to let Qwen continue.`);
+    if (step === MAX_AGENT_STEPS - 1) addError(c, `Stopped after ${MAX_AGENT_STEPS} steps. Send a message to let Qwen continue.`);
   }
-  setActivity('');
+  return false;
 }
 
-function stopChat() {
-  state.stopRequested = true;
-  if (state.currentChatId) api.chatAbort(state.currentChatId);
-  state.pendingApproval?.finish(false);
+function stopChat(c = state.conv) {
+  if (!c?.busy) return;
+  c.stopRequested = true;
+  if (c.chatId) api.chatAbort(c.chatId);
+  c.pendingApproval?.finish(false);
 }
 
-function setBusy(b) {
-  state.busy = b;
-  if (b) state.stopRequested = false;
-  $('#btn-send').classList.toggle('hidden', b);
-  $('#btn-stop').classList.toggle('hidden', !b);
-  if (!b) setActivity('');
+function setBusy(c, b) {
+  c.busy = b;
+  if (b) {
+    c.stopRequested = false;
+    c.status = 'running';
+  } else {
+    c.activity = '';
+  }
+  c.updatedAt = Date.now();
+  if (c === state.conv) renderRunControls();
+  renderHistory();
 }
 
-function setActivity(text) {
+function setActivity(c, text) {
+  c.activity = text;
+  if (c === state.conv) renderRunControls();
+}
+
+function renderRunControls() {
+  const c = state.conv;
+  $('#btn-send').classList.toggle('hidden', !!c?.busy);
+  $('#btn-stop').classList.toggle('hidden', !c?.busy);
+  const text = c?.busy ? c.activity : '';
   $('#activity').classList.toggle('hidden', !text);
   $('#activity-text').textContent = text ? `${text}…` : '';
 }
 
 function updateCtxMeter() {
   const m = $('#ctx-meter');
-  const u = state.lastUsage;
+  const u = state.conv?.usage;
   if (!u) {
     m.classList.add('hidden');
     return;
@@ -1549,21 +1864,18 @@ function monacoLang(lang) {
 async function applyCodeToFile(p, content) {
   const exists = await api.exists(p);
   const original = exists ? findTab(p)?.model.getValue() ?? (await api.read(p)) : null;
+  const c = state.conv;
   const ok = await new Promise((resolve) => {
-    state.pendingApproval = {
-      cancelOnClose: true,
-      finish: (v) => {
-        state.pendingApproval = null;
-        closeReview(true);
-        resolve(v);
-      }
+    const onDecide = (v) => {
+      closeReview(true);
+      resolve(v);
     };
-    openReview({ path: p, original: original ?? '', modified: content, pending: true, title: `${exists ? 'Apply changes to' : 'Create'} ${p}` });
+    openReview({ path: p, original: original ?? '', modified: content, pending: true, title: `${exists ? 'Apply changes to' : 'Create'} ${p}`, onDecide, cancelOnClose: true });
   });
   if (!ok) return;
   await api.write(p, content);
   syncOpenTab(p, content);
-  recordChange(p, original, content);
+  recordChange(c, p, original, content);
   expandTo(p);
   state.fileIndex = null;
   await renderTree();
@@ -1572,14 +1884,20 @@ async function applyCodeToFile(p, content) {
   flash(`Wrote ${p}`);
 }
 
-function addUserMessage(text, attached) {
-  const node = el('div', { class: 'msg user' }, text);
-  if (attached.length) node.append(el('div', { class: 'attached' }, ...attached.map((a) => el('span', { text: baseName(a), title: a }))));
-  $('#messages').append(node);
-  scrollChat(true);
+function addUserMessage(c, text, attached) {
+  c.display.push({ t: 'user', text, attached });
+  c.updatedAt = Date.now();
+  renderUserMessage(c, text, attached);
 }
 
-function addError(text, usedTools) {
+function renderUserMessage(c, text, attached) {
+  const node = el('div', { class: 'msg user' }, text);
+  if (attached.length) node.append(el('div', { class: 'attached' }, ...attached.map((a) => el('span', { text: baseName(a), title: a }))));
+  c.container.append(node);
+  scrollChat(c, true);
+}
+
+function addError(c, text, usedTools) {
   let hint = '';
   if (usedTools && /tool|function/i.test(text)) {
     hint = '\n\nThis model may not support tool calling. Switch to "Chat" below the message box, or pick a tool-capable model such as qwen2.5-coder, qwen3 or qwen3-coder.';
@@ -1588,16 +1906,27 @@ function addError(text, usedTools) {
   } else if (/401|403|api key|unauthorized/i.test(text)) {
     hint = '\n\nCheck the API key in Settings.';
   }
-  $('#messages').append(el('div', { class: 'msg error' }, iconEl('alert'), el('div', { text: text + hint })));
-  scrollChat(true);
+  c.display.push({ t: 'error', text: text + hint });
+  renderError(c, text + hint);
 }
 
-function addAssistantMessage() {
+function renderError(c, text) {
+  c.container.append(el('div', { class: 'msg error' }, iconEl('alert'), el('div', { text })));
+  scrollChat(c, true);
+}
+
+// `item` is the saved display entry when restoring; otherwise a new one is recorded.
+function addAssistantMessage(c, item) {
+  const restoring = !!item;
+  if (!item) {
+    item = { t: 'assistant', content: '', reasoning: '', hasCalls: false, steps: [] };
+    c.display.push(item);
+  }
   const think = el('details', { class: 'think hidden' }, el('summary', {}, iconEl('chevronRight'), el('span', { class: 'think-label', text: 'Thinking' })), el('div', { class: 'think-body' }));
-  const md = el('div', { class: 'md cursor' });
+  const md = el('div', { class: `md${restoring ? '' : ' cursor'}` });
   const steps = el('div', { class: 'steps' });
-  $('#messages').append(el('div', { class: 'msg assistant' }, think, md, steps));
-  scrollChat(true);
+  c.container.append(el('div', { class: 'msg assistant' }, think, md, steps));
+  scrollChat(c, true);
 
   let content = '';
   let reasoning = '';
@@ -1619,7 +1948,7 @@ function addAssistantMessage() {
       think.querySelector('.think-body').textContent = allThink;
     }
     renderMarkdown(md, visible.trim());
-    scrollChat();
+    scrollChat(c);
   };
   const schedule = () => {
     if (!pending) {
@@ -1639,26 +1968,34 @@ function addAssistantMessage() {
     },
     setContent(t) {
       content = t;
+      item.content = t;
       schedule();
     },
-    setFinal(c, r) {
-      content = c;
+    setFinal(cText, r) {
+      content = cText;
       reasoning = r;
+      item.content = cText;
+      item.reasoning = r;
       schedule();
     },
     finish(hasCalls) {
       draw();
+      item.hasCalls = !!hasCalls;
       md.classList.remove('cursor');
       md.classList.toggle('narration', !!hasCalls);
       think.querySelector('.think-label').textContent = 'Thought process';
     },
-    addStep(call) {
-      return makeStepRow(steps, call);
+    addStep(call, stepItem) {
+      if (!stepItem) {
+        stepItem = { call, status: 'running' };
+        item.steps.push(stepItem);
+      }
+      return makeStepRow(c, steps, call, stepItem);
     }
   };
 }
 
-function makeStepRow(container, call) {
+function makeStepRow(c, container, call, rec) {
   let args = {};
   try {
     args = JSON.parse(call.function.arguments || '{}');
@@ -1684,63 +2021,91 @@ function makeStepRow(container, call) {
   });
   head.onclick = () => row.classList.toggle('open');
   container.append(row);
-  scrollChat();
+  scrollChat(c);
+
+  const setBody = (text) => {
+    rec.body = text.length > 4000 ? text.slice(0, 4000) + '\n…' : text;
+    rec.diff = false;
+    body.textContent = text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
+  };
+  const setDiffBody = (diffText) => {
+    rec.body = diffText.length > 8000 ? diffText.slice(0, 8000) : diffText;
+    rec.diff = true;
+    renderDiffPreview(body, diffText);
+  };
+  const setVerb = (v) => {
+    rec.verb = v;
+    verb.textContent = v;
+  };
+  const linkToChange = (path) => {
+    rec.changePath = path;
+    onTarget = () => openChangeReview(path);
+    target.classList.add('link');
+  };
+  const showResult = (failed, metaText, metaHtml) => {
+    row.classList.remove('running', 'waiting');
+    row.classList.add(failed ? 'bad' : 'ok');
+    stateEl.innerHTML = icon(failed ? 'x' : 'check');
+    if (metaHtml) meta.innerHTML = metaHtml;
+    else meta.textContent = metaText || '';
+  };
 
   return {
     doing: info.doing,
     target: d.target,
-    setBody(text) {
-      body.textContent = text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
-    },
-    setDiffBody(diffText) {
-      renderDiffPreview(body, diffText);
-    },
-    setVerb(v) {
-      verb.textContent = v;
-    },
-    onTarget(fn) {
-      onTarget = fn;
-      target.classList.add('link');
-    },
+    setBody,
+    setDiffBody,
+    setVerb,
+    linkToChange,
     done(out) {
       const failed = out.failed || /^Error/.test(out.result) || out.rejected || /^Cancelled/.test(out.result);
-      row.classList.remove('running', 'waiting');
-      row.classList.add(failed ? 'bad' : 'ok');
-      stateEl.innerHTML = icon(failed ? 'x' : 'check');
-      if (out.metaHtml) meta.innerHTML = out.metaHtml;
-      else meta.textContent = out.rejected ? 'rejected' : /^Error/.test(out.result) ? 'failed' : out.meta || '';
+      const metaText = out.rejected ? 'rejected' : /^Error/.test(out.result) ? 'failed' : out.meta || '';
+      Object.assign(rec, { status: failed ? 'bad' : 'ok', meta: metaText, metaHtml: out.metaHtml || null });
+      showResult(failed, metaText, out.metaHtml);
       if (/^Error/.test(out.result)) {
-        body.textContent = out.result;
+        setBody(out.result);
         stateEl.title = out.result;
       }
+    },
+    // Shows a saved step as it ended.
+    restore() {
+      if (rec.verb) verb.textContent = rec.verb;
+      if (rec.body) (rec.diff ? renderDiffPreview(body, rec.body) : (body.textContent = rec.body));
+      if (rec.changePath) linkToChange(rec.changePath);
+      if (rec.status === 'running') showResult(true, 'interrupted');
+      else showResult(rec.status === 'bad', rec.meta, rec.metaHtml);
     },
     requestApproval(opts) {
       row.classList.remove('running');
       row.classList.add('waiting');
       stateEl.innerHTML = icon('alert');
-      setActivity('Waiting for your approval');
       return new Promise((resolve) => {
         const bar = el('div', { class: 'step-approval' });
         const finish = (v) => {
-          if (state.pendingApproval?.finish === finish) state.pendingApproval = null;
+          if (c.pendingApproval?.finish !== finish) return;
+          c.pendingApproval = null;
           bar.remove();
           row.classList.remove('waiting');
           row.classList.add('running');
           stateEl.replaceChildren(el('span', { class: 'spinner' }));
-          if (state.review?.pending && state.review.path === opts.path) closeReview(true);
-          setActivity(v ? 'Working' : '');
+          if (state.review?.onDecide === finish) closeReview(true);
+          setActivity(c, v ? 'Working' : '');
+          renderHistory();
           resolve(v);
         };
-        state.pendingApproval = { finish };
+        c.pendingApproval = { finish };
+        setActivity(c, 'Waiting for your approval');
+        renderHistory();
+        const review = () => openReview({ path: opts.path, original: opts.original, modified: opts.modified, pending: true, title: opts.question, onDecide: finish });
         if (opts.kind === 'edit') {
           bar.append(
             el('div', { class: 'q' }, el('span', { text: opts.question }), el('span', { class: 'stats', html: statsHtml(opts.stats) })),
             el('div', { class: 'btns' },
-              el('button', { class: 'ghost', onclick: () => openReview({ path: opts.path, original: opts.original, modified: opts.modified, pending: true, title: opts.question }) }, iconEl('columns'), 'Review'),
+              el('button', { class: 'ghost', onclick: review }, iconEl('columns'), 'Review'),
               el('button', { class: 'ghost danger-text', onclick: () => finish(false) }, 'Reject'),
               el('button', { class: 'primary', onclick: () => finish(true) }, iconEl('check'), 'Approve'))
           );
-          if (state.settings.followAgent) openReview({ path: opts.path, original: opts.original, modified: opts.modified, pending: true, title: opts.question });
+          if (state.settings.followAgent && c === state.conv) review();
         } else {
           const prefix = commandPrefix(opts.command);
           bar.append(
@@ -1753,8 +2118,8 @@ function makeStepRow(container, call) {
           );
         }
         row.append(bar);
-        scrollChat(true);
-        bar.querySelector('button.primary').focus({ preventScroll: true });
+        scrollChat(c, true);
+        if (c === state.conv) bar.querySelector('button.primary').focus({ preventScroll: true });
       });
     }
   };
@@ -1767,7 +2132,8 @@ function renderDiffPreview(pre, diffText) {
   );
 }
 
-function scrollChat(force) {
+function scrollChat(c, force) {
+  if (c !== state.conv) return;
   const box = $('#messages');
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 140;
   if (force || nearBottom) box.scrollTop = box.scrollHeight;
@@ -2479,13 +2845,16 @@ function showMenu(x, y, items, { above } = {}) {
 }
 
 let inputResolve = null;
-function askInput(title, placeholder = '') {
+function askInput(title, placeholder = '', initial = '') {
   $('#input-title').textContent = title;
   const inp = $('#input-value');
-  inp.value = '';
+  inp.value = initial;
   inp.placeholder = placeholder;
   $('#input-modal').classList.remove('hidden');
-  setTimeout(() => inp.focus(), 0);
+  setTimeout(() => {
+    inp.focus();
+    inp.select();
+  }, 0);
   return new Promise((r) => (inputResolve = r));
 }
 function closeInput(v) {
@@ -2626,7 +2995,11 @@ function bindUi() {
 
   $('#btn-new-chat').onclick = newChat;
   $('#btn-send').onclick = send;
-  $('#btn-stop').onclick = stopChat;
+  $('#btn-stop').onclick = () => stopChat(state.conv);
+  $('#btn-history').onclick = () => showView('history');
+  $('#chat-running').onclick = () => showView('history');
+  $('#btn-new-task').onclick = newChat;
+  $('#history-search').oninput = renderHistory;
   $('#btn-attach').onclick = (e) => showAttachMenu(e.currentTarget);
   $('#btn-approval').onclick = (e) => showApprovalMenu(e.currentTarget);
   $$('#mode-seg button').forEach((b) => {
@@ -2719,6 +3092,12 @@ function bindUi() {
     } else if (key === 'e' && e.shiftKey) {
       e.preventDefault();
       showView('explorer');
+    } else if (key === 'n' && !e.shiftKey) {
+      e.preventDefault();
+      newChat();
+    } else if (key === 'h' && e.shiftKey) {
+      e.preventDefault();
+      showView('history');
     } else if (key === 'a' && e.shiftKey) {
       e.preventDefault();
       openQuick('attach');

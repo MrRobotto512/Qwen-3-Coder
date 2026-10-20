@@ -30,7 +30,8 @@
     <nav id="activitybar">
       <button class="act active" data-view="explorer" title="Explorer (Ctrl+Shift+E)"><span data-icon="files"></span></button>
       <button class="act" data-view="search" title="Search in project (Ctrl+Shift+F)"><span data-icon="search"></span></button>
-      <button class="act" data-view="changes" title="Changes made by Qwen"><span data-icon="changes"></span><span id="changes-badge" class="badge hidden"></span></button>
+      <button class="act" data-view="history" title="Conversations & tasks (Ctrl+Shift+H)"><span data-icon="history"></span><span id="history-badge" class="badge hidden"></span></button>
+      <button class="act" data-view="changes" title="Changes made in this conversation"><span data-icon="changes"></span><span id="changes-badge" class="badge hidden"></span></button>
       <div class="spacer"></div>
       <button class="act" id="act-terminal" title="Terminal (Ctrl+`)"><span data-icon="terminal"></span></button>
       <button class="act" id="act-settings" title="Settings"><span data-icon="settings"></span></button>
@@ -61,9 +62,23 @@
         <div id="search-results" class="scroll"></div>
       </section>
 
+      <section class="view hidden" id="view-history">
+        <div class="view-head">
+          <span class="view-title">History</span>
+          <div class="view-actions">
+            <button class="icon-btn" id="btn-new-task" title="New conversation (Ctrl+N)"><span data-icon="plus"></span></button>
+          </div>
+        </div>
+        <div class="search-box">
+          <span data-icon="search" class="dim"></span>
+          <input id="history-search" placeholder="Search conversations…" spellcheck="false" />
+        </div>
+        <div id="history-list" class="scroll"></div>
+      </section>
+
       <section class="view hidden" id="view-changes">
         <div class="view-head">
-          <span class="view-title">Changes by Qwen</span>
+          <span class="view-title">Changes in this conversation</span>
           <div class="view-actions">
             <button class="icon-btn" id="btn-revert-all" title="Revert all changes"><span data-icon="undo"></span></button>
           </div>
@@ -110,7 +125,9 @@
         <span data-icon="sparkles" class="accent"></span>
         <span id="chat-title">New chat</span>
         <div class="spacer"></div>
-        <button class="icon-btn" id="btn-new-chat" title="New chat"><span data-icon="plus"></span></button>
+        <button class="running-pill hidden" id="chat-running" title="Other tasks running in the background"><span class="spinner"></span><span></span></button>
+        <button class="icon-btn" id="btn-history" title="History (Ctrl+Shift+H)"><span data-icon="history"></span></button>
+        <button class="icon-btn" id="btn-new-chat" title="New conversation (Ctrl+N)"><span data-icon="plus"></span></button>
       </div>
       <div id="messages" class="scroll"></div>
       <div id="activity" class="hidden"><span class="spinner"></span><span id="activity-text"></span></div>

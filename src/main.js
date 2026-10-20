@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS = {
   contextLength: 32768,
   recentWorkspaces: [],
   autoCheckUpdates: true,
+  lastConversations: {}, // workspace root -> id of the conversation open when the app closed
   lastWorkspace: null,
   fontSize: 14
 };
@@ -670,5 +671,67 @@ ipcMain.handle('ollama:pull', async (event, model) => {
 
 ipcMain.handle('ollama:pull-cancel', (_e, model) => {
   pulls.get(model)?.abort();
+  return true;
+});
+
+// ---------- conversation history ----------
+// Each conversation is a JSON file; index.json holds the summaries the history list shows.
+const CONV_ID = /^[a-z0-9]{6,40}$/i;
+
+function convDir() {
+  return path.join(app.getPath('userData'), 'conversations');
+}
+function convFile(id) {
+  if (!CONV_ID.test(String(id))) throw new Error('Invalid conversation id');
+  return path.join(convDir(), `${id}.json`);
+}
+function writeJsonAtomic(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.renameSync(tmp, file);
+}
+function readConvIndex() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(convDir(), 'index.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+function convSummary(c) {
+  return {
+    id: c.id,
+    title: c.title,
+    workspace: c.workspace,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    status: c.status,
+    model: c.model,
+    mode: c.mode,
+    changes: (c.changes || []).length,
+    messages: (c.display || []).filter((d) => d.t === 'user').length
+  };
+}
+function updateConvIndex(fn) {
+  const index = fn(readConvIndex());
+  writeJsonAtomic(path.join(convDir(), 'index.json'), index);
+  return index;
+}
+
+ipcMain.handle('conv:list', (_e, workspace) =>
+  readConvIndex()
+    .filter((c) => !workspace || c.workspace === workspace)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+);
+ipcMain.handle('conv:load', (_e, id) => JSON.parse(fs.readFileSync(convFile(id), 'utf8')));
+ipcMain.handle('conv:save', (_e, conv) => {
+  writeJsonAtomic(convFile(conv.id), conv);
+  const summary = convSummary(conv);
+  updateConvIndex((index) => [...index.filter((c) => c.id !== conv.id), summary]);
+  return summary;
+});
+ipcMain.handle('conv:delete', (_e, id) => {
+  fs.rmSync(convFile(id), { force: true });
+  updateConvIndex((index) => index.filter((c) => c.id !== id));
   return true;
 });

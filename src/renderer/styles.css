@@ -463,3 +463,28 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .toast .t-close { margin: -4px -4px 0 0; }
 .toast .t-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .toast .t-actions button { font-size: 12px; padding: 3px 10px; }
+
+/* ---------- conversation history ---------- */
+.conv-log { display: flex; flex-direction: column; gap: 10px; min-height: 100%; }
+#messages { display: block; }
+#history-list { flex: 1; padding-bottom: 12px; }
+.h-group { padding: 10px 14px 4px; font-size: 10.5px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; color: var(--text-3); }
+.h-item { display: flex; align-items: center; gap: 9px; padding: 6px 6px 6px 12px; margin: 0 6px; border-radius: 6px; cursor: pointer; border-left: 2px solid transparent; }
+.h-item:hover { background: var(--bg-3); }
+.h-item.active { background: var(--accent-bg); border-left-color: var(--accent); }
+.h-status { width: 16px; display: grid; place-items: center; flex: none; color: var(--text-3); }
+.h-status .i { width: 14px; height: 14px; }
+.h-item.st-done .h-status { color: var(--green); }
+.h-item.st-error .h-status { color: var(--red); }
+.h-item.st-waiting .h-status { color: var(--yellow); }
+.h-item.st-stopped .h-status .i { width: 12px; height: 12px; }
+.h-main { flex: 1; min-width: 0; }
+.h-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.h-sub { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.h-acts { display: none; gap: 1px; }
+.h-item:hover .h-acts { display: flex; }
+.badge.warn { background: var(--yellow); color: #1a1a1a; }
+.running-pill { background: var(--accent-bg); border-color: transparent; color: var(--accent-2); font-size: 11.5px; padding: 2px 9px; border-radius: 10px; }
+.running-pill.warn { background: var(--yellow-bg); color: var(--yellow); }
+.running-pill .spinner { width: 10px; height: 10px; }
+.recent-link { margin-top: 14px; color: var(--text-2); font-size: 12px; }
