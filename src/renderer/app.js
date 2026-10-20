@@ -901,7 +901,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'list_files',
-      description: 'List files and folders in a project folder (skips node_modules, .git and build output). Folders end with "/". Starts shallow; list a subfolder or raise depth to see more.',
+      description: 'List files and folders in a project folder (skips node_modules, .git and build output). Folders end with "/". Starts shallow; list a subfolder or raise depth to see more. Use this instead of run_command with dir or ls.',
       parameters: {
         type: 'object',
         properties: {
@@ -915,7 +915,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read a text file from the project. Optionally read only a range of lines.',
+      description: 'Read a text file from the project, optionally only a range of lines. Use this instead of run_command with type or cat. Several read_file calls in one reply run in parallel.',
       parameters: {
         type: 'object',
         properties: {
@@ -931,7 +931,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'search_code',
-      description: 'Search all project files for text (case-insensitive). Returns matching file:line entries.',
+      description: 'Search all project files for text (case-insensitive) and return matching file:line entries. Use this to find where something is defined or used instead of reading files one by one.',
       parameters: {
         type: 'object',
         properties: {
@@ -946,7 +946,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Create a new file or completely overwrite an existing file with the given content. Parent folders are created automatically. Prefer edit_file for small changes to existing files.',
+      description: 'Create a new file, or completely overwrite an existing one. Parent folders are created automatically. For changes to an existing file, use edit_file instead.',
       parameters: {
         type: 'object',
         properties: {
@@ -977,11 +977,25 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run a shell command in the project root and return its output (non-interactive, 2 minute timeout). Use it to install packages, build, run tests or scripts.',
+      description: 'Run a shell command in the project root and return its output (non-interactive, 2 minute timeout). Use it to build, test, install packages or run scripts, instead of for reading or searching files.',
       parameters: { type: 'object', properties: { command: { type: 'string', description: 'The command line to run.' } }, required: ['command'] }
     }
   }
 ];
+
+// Tools that only read can run together; anything that changes files or runs commands is a
+// barrier that runs alone, in the order Qwen asked.
+const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'search_code']);
+
+function toolBatches(calls) {
+  const batches = [];
+  for (const call of calls) {
+    const last = batches[batches.length - 1];
+    if (READ_ONLY_TOOLS.has(call.function.name) && last && READ_ONLY_TOOLS.has(last[0].function.name)) last.push(call);
+    else batches.push([call]);
+  }
+  return batches;
+}
 
 const TOOL_INFO = {
   list_files: { icon: 'list', verb: 'List', doing: 'Listing' },
@@ -1031,6 +1045,7 @@ function systemPrompt(c) {
   if (agent) {
     parts.push(
       '- Explore before changing things: use search_code and read_file instead of guessing file contents.',
+      '- When you need several independent lookups (reads, searches, listings), request them all in the same reply; they run in parallel. Edits and commands run one at a time, in the order you give them.',
       '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
       '- Paths are relative to the project root and use forward slashes.',
       '- Tool results come from the tools you call, not from the user. Keep working until the task is done instead of stopping to describe what you will do next.',
@@ -1796,16 +1811,19 @@ async function runConversation(c) {
     saveConv(c);
     if (!calls.length) return false;
 
-    for (const call of calls) {
+    for (const batch of toolBatches(calls)) {
       if (c.stopRequested) {
-        c.history.push({ role: 'tool', tool_call_id: call.id, content: 'Cancelled by the user.' });
+        for (const call of batch) c.history.push({ role: 'tool', tool_call_id: call.id, content: 'Cancelled by the user.' });
         continue;
       }
-      const row = view.addStep(call);
-      setActivity(c, `${row.doing} ${row.target}`);
-      const out = await executeTool(c, call, row);
-      row.done(out);
-      c.history.push({ role: 'tool', tool_call_id: call.id, content: out.result });
+      const rows = batch.map((call) => view.addStep(call));
+      setActivity(c, rows.length > 1 ? `Running ${rows.length} lookups` : `${rows[0].doing} ${rows[0].target}`);
+      const outs = await Promise.all(batch.map((call, i) => executeTool(c, call, rows[i])));
+      // Results go back in the order Qwen asked for them, whatever order they finished in.
+      batch.forEach((call, i) => {
+        rows[i].done(outs[i]);
+        c.history.push({ role: 'tool', tool_call_id: call.id, content: outs[i].result });
+      });
       saveConv(c);
     }
     if (step === MAX_AGENT_STEPS - 1) addError(c, `Stopped after ${MAX_AGENT_STEPS} steps. Send a message to let Qwen continue.`);
