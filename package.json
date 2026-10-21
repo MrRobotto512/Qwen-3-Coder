@@ -6,7 +6,8 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win nsis portable zip --x64",
-    "dist:zip": "electron-builder --win zip"
+    "dist:zip": "electron-builder --win zip",
+    "test": "node --test test/*.test.js"
   },
   "author": "",
   "dependencies": {
