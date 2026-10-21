@@ -1316,19 +1316,43 @@ function deferredCatalog() {
 // deferred tool, because Qwen's template puts the tools inside the cached system prompt.
 const WEB_TOOLS = new Set(['web_search', 'fetch_url']);
 
+// The configured heavy model as a per-request override, or null if it isn't set up.
+function heavyOverride() {
+  const h = state.settings.heavy;
+  if (!h || !h.enabled || !h.model) return null;
+  const override = { provider: h.provider, baseUrl: h.baseUrl, apiKey: h.apiKey, model: h.model };
+  // A cloud heavy model needs a key; a local one (Ollama/LM Studio) does not.
+  if (!['ollama', 'lmstudio'].includes(h.provider) && !h.apiKey) return null;
+  return override;
+}
+
+function heavyLabel() {
+  return state.settings.heavy?.model || 'heavy model';
+}
+
+const CONSULT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'consult_planner',
+    description: 'Ask the stronger "planner" model for help with a hard sub-problem: a design decision, a tricky bug, a review, or a plan. Include all the context it needs in your question (paste the relevant code and error). Use it sparingly for the hard parts; do the ordinary work yourself.',
+    parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question, with enough context to answer it standalone.' } }, required: ['question'] }
+  }
+};
+
 function toolsFor(c) {
   const active = new Set(c.activeTools || []);
   const core = state.settings.webResearch === false ? CORE_TOOLS.filter((t) => !WEB_TOOLS.has(t.function.name)) : CORE_TOOLS;
   const deferred = deferredCatalog();
   const tools = [...core, ...deferred.filter((t) => active.has(t.function.name))];
   if (c.skills?.length) tools.push(LOAD_SKILL_TOOL);
+  if (heavyOverride()) tools.push(CONSULT_TOOL);
   if (deferred.some((t) => !active.has(t.function.name))) tools.push(TOOL_SEARCH_TOOL);
   return tools;
 }
 
 // Tools that only read can run together; anything that changes files or runs commands is a
 // barrier that runs alone, in the order Qwen asked.
-const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'search_code', 'load_skill', 'tool_search', 'web_search', 'fetch_url']);
+const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'search_code', 'load_skill', 'tool_search', 'web_search', 'fetch_url', 'consult_planner']);
 const WEB_PAGE_CHARS = 12_000;
 const READ_PAGE = 400;
 
@@ -1372,6 +1396,7 @@ const TOOL_INFO = {
   delete_file: { icon: 'trash', verb: 'Delete', doing: 'Deleting' },
   move_file: { icon: 'external', verb: 'Move', doing: 'Moving' },
   load_skill: { icon: 'book', verb: 'Skill', doing: 'Loading skill' },
+  consult_planner: { icon: 'sparkles', verb: 'Consult', doing: 'Asking the planner about' },
   tool_search: { icon: 'search', verb: 'Find tools', doing: 'Looking up tools for' }
 };
 
@@ -1522,6 +1547,8 @@ function describeCall(name, args) {
       return { target: `${baseName(normPath(args.from))} → ${normPath(args.to)}`, title: `${args.from} → ${args.to}` };
     case 'load_skill':
       return { target: `${args.name || ''}${args.file ? ` · ${args.file}` : ''}` };
+    case 'consult_planner':
+      return { target: `${heavyLabel()}: ${String(args.question || '').slice(0, 60)}`, title: args.question };
     case 'tool_search':
     case 'web_search':
       return { target: `“${args.query || ''}”` };
@@ -1713,6 +1740,24 @@ async function executeTool(c, call, row) {
         row.setBody(r.content);
         const more = !args.file && r.files.length ? `\n\nSupporting files (load one with load_skill and file): ${r.files.join(', ')}` : '';
         return { result: `<skill name="${skill.name}"${args.file ? ` file="${args.file}"` : ''}>\n${truncate(r.content)}\n</skill>${more}`, meta: args.file || `${skill.scope} skill` };
+      }
+      case 'consult_planner': {
+        const override = heavyOverride();
+        if (!override) return { result: 'Error: no planner (heavy) model is configured.', failed: true };
+        const question = String(args.question || '').trim();
+        if (!question) return { result: 'Error: empty question.' };
+        setActivity(c, `Asking ${override.model}`);
+        const res = await api.chatStream(`consult${Date.now()}`, {
+          override,
+          messages: [
+            { role: 'system', content: 'You are a senior engineer advising another AI coding agent working in the user\'s project. Give precise, actionable guidance: the decision or plan, the specific code to write or fix, and any gotchas. Be concise. Do not ask to run tools; answer from what you are given.' },
+            { role: 'user', content: question }
+          ]
+        });
+        const answer = res.ok ? stripThink(res.content || '').trim() : '';
+        if (!answer) return { result: `The planner model did not answer${res.error ? `: ${res.error}` : '.'}`, failed: true };
+        row.setBody(answer);
+        return { result: `<planner_advice model="${override.model}">\n${truncate(answer)}\n</planner_advice>\nUse this advice to continue the work yourself.`, meta: override.model };
       }
       case 'tool_search': {
         const words = String(args.query || '').toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 2);
@@ -2240,14 +2285,17 @@ async function runConversation(c) {
   const maxSteps = Math.max(10, parseInt(state.settings.maxSteps, 10) || DEFAULT_MAX_STEPS);
   const seen = new Map(); // call signature -> first step it ran
   let stall = 0; // consecutive rounds with no real progress
+  let escalateNext = false; // run the next turn on the heavy model to break an impasse
   for (let step = 0; step < maxSteps; step++) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
     if (c.stopRequested) return false;
-    const view = addAssistantMessage(c);
+    const override = escalateNext ? heavyOverride() : null;
+    escalateNext = false;
+    const view = addAssistantMessage(c, null, override ? override.model : null);
     const id = `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
     c.chatId = id;
-    setActivity(c, step === 0 ? 'Thinking' : 'Working');
+    setActivity(c, override ? `Handing off to ${override.model}` : step === 0 ? 'Thinking' : 'Working');
 
     const off = api.onChatEvent((ev) => {
       if (ev.id !== id) return;
@@ -2256,7 +2304,8 @@ async function runConversation(c) {
     });
     const res = await api.chatStream(id, {
       messages: requestMessages(c),
-      tools: useTools ? toolsFor(c) : undefined
+      tools: useTools ? toolsFor(c) : undefined,
+      override: override || undefined
     });
     // IPC events and the invoke reply travel on separate channels, so late deltas can
     // arrive after this resolves. The reply carries the full text; use it as the final state.
@@ -2331,6 +2380,13 @@ async function runConversation(c) {
     // Nudge the model back on track before it burns through the whole budget.
     if (stall === STALL_LIMIT) {
       c.history.push({ role: 'user', content: '<system-reminder>\nYou have repeated steps without making progress. Stop exploring. Either make the next concrete change for the current plan item, or, if you are blocked or the task is done, reply to the user in plain text (no tool call) — ask a question with ask_user if you need a decision.\n</system-reminder>' });
+      // If a heavy model is set up, hand the next turn to it to break the impasse.
+      if (heavyOverride()) {
+        escalateNext = true;
+        const item = { t: 'notice', text: `Qwen seems stuck — handing off to ${heavyLabel()} for the next step.` };
+        c.display.push(item);
+        renderNotice(c, item);
+      }
     }
     if (step === maxSteps - 2) {
       c.history.push({ role: 'user', content: '<system-reminder>\nThis is your last step. Finish now: summarize what you did and what remains for the user, in plain text with no tool call.\n</system-reminder>' });
@@ -2689,16 +2745,20 @@ function renderError(c, text) {
 }
 
 // `item` is the saved display entry when restoring; otherwise a new one is recorded.
-function addAssistantMessage(c, item) {
+function addAssistantMessage(c, item, modelLabel) {
   const restoring = !!item;
   if (!item) {
     item = { t: 'assistant', content: '', reasoning: '', hasCalls: false, steps: [] };
+    if (modelLabel) item.modelLabel = modelLabel;
     c.display.push(item);
   }
   const think = el('details', { class: 'think hidden' }, el('summary', {}, iconEl('chevronRight'), el('span', { class: 'think-label', text: 'Thinking' })), el('div', { class: 'think-body' }));
   const md = el('div', { class: `md${restoring ? '' : ' cursor'}` });
   const steps = el('div', { class: 'steps' });
-  c.container.append(el('div', { class: 'msg assistant' }, think, md, steps));
+  const badge = (item.modelLabel || modelLabel)
+    ? [el('div', { class: 'model-badge' }, iconEl('sparkles'), el('span', { text: item.modelLabel || modelLabel }))]
+    : [];
+  c.container.append(el('div', { class: 'msg assistant' }, ...badge, think, md, steps));
   scrollChat(c, true);
 
   let content = '';
@@ -3352,6 +3412,13 @@ function openSettings() {
   $('#s-approvalMode').value = approvalMode();
   $('#s-allowedCommands').value = (s.allowedCommands || []).join(', ');
   $('#s-maxSteps').value = s.maxSteps || DEFAULT_MAX_STEPS;
+  const h = s.heavy || {};
+  $('#s-heavy-enabled').checked = !!h.enabled;
+  $('#s-heavy-provider').value = h.provider || 'gemini';
+  $('#s-heavy-baseUrl').value = h.baseUrl || PROVIDERS.gemini.baseUrl;
+  $('#s-heavy-apiKey').value = h.apiKey || '';
+  $('#s-heavy-model').value = h.model || '';
+  $('#s-heavy-fields').classList.toggle('hidden', !h.enabled);
   $('#s-test-result').textContent = '';
   $('#settings-modal').classList.remove('hidden');
 }
@@ -3370,6 +3437,13 @@ async function saveSettingsFromUi() {
   patch.allowedCommands = $('#s-allowedCommands').value.split(',').map((x) => x.trim()).filter(Boolean);
   patch.maxSteps = Math.min(200, Math.max(10, parseInt($('#s-maxSteps').value, 10) || DEFAULT_MAX_STEPS));
   for (const k of ['agentMode', 'includeCurrentFile', 'followAgent', 'autoCheckUpdates']) patch[k] = $(`#s-${k}`).checked;
+  patch.heavy = {
+    enabled: $('#s-heavy-enabled').checked,
+    provider: $('#s-heavy-provider').value,
+    baseUrl: $('#s-heavy-baseUrl').value.trim(),
+    apiKey: $('#s-heavy-apiKey').value.trim(),
+    model: $('#s-heavy-model').value.trim()
+  };
   state.settings = await api.setSettings(patch);
   $('#settings-modal').classList.add('hidden');
   applySettingsToUi();
@@ -4113,6 +4187,12 @@ function bindUi() {
     if (p.baseUrl) $('#s-baseUrl').value = p.baseUrl;
     if (p.model) $('#s-model').value = p.model;
   };
+  $('#s-heavy-provider').onchange = (e) => {
+    const p = PROVIDERS[e.target.value];
+    if (p && p.baseUrl) $('#s-heavy-baseUrl').value = p.baseUrl;
+    if (p && p.model) $('#s-heavy-model').value = p.model;
+  };
+  $('#s-heavy-enabled').onchange = (e) => $('#s-heavy-fields').classList.toggle('hidden', !e.target.checked);
   $('#s-fetch-models').onclick = fetchModels;
   $('#s-searchProvider').onchange = renderSearchFields;
   $('#mcp-add-btn').onclick = addServerFromForm;

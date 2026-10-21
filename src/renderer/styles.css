@@ -240,6 +240,8 @@ kbd { font: 11px var(--sans); color: var(--text-3); background: var(--bg-3); bor
 .msg.user .attached { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .msg.user .attached span { font-size: 11px; color: var(--text-2); background: var(--bg-2); border-radius: 4px; padding: 0 6px; }
 .msg.assistant { line-height: 1.6; }
+.msg.assistant .model-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--accent-2); background: var(--accent-bg); border-radius: 6px; padding: 1px 7px 1px 5px; margin-bottom: 5px; }
+.msg.assistant .model-badge svg { width: 12px; height: 12px; }
 .msg.assistant + .msg.assistant { margin-top: -8px; }
 .msg.assistant .md:empty { display: none; }
 .msg.assistant .md > :first-child { margin-top: 0; }

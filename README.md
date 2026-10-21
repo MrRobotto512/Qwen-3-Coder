@@ -64,6 +64,11 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - Always available: `list_files`, `read_file`, `search_code`, `edit_file`, `write_file`, `run_command`, `todo_write`, `ask_user`, plus `web_search` and `fetch_url` unless research is turned off.
   - On demand: `load_skill` (when the project has skills), and `delete_file` / `move_file`, which Qwen loads with `tool_search` when needed.
   - Independent lookups in one reply run in parallel; edits and commands run one at a time.
+- **Planner handoff (two models):**
+  - Let a local Qwen do the grunt work and hand the hard parts to a stronger "planner" model (e.g. Gemini 2.5 Pro, or another Qwen in the cloud). Set it up in **Settings → Planner (heavy model) handoff**.
+  - When Qwen stalls — repeating steps without progress — the next step runs on the planner automatically to break the impasse, then control returns to Qwen.
+  - Qwen can also ask the planner for help on demand with a `consult_planner` tool (a design decision, a tricky bug, a review), and uses the advice to keep working locally.
+  - A small badge on a message shows when it ran on the planner. The planner's requests go to that provider and use its quota/billing; the grunt work stays on your local model.
 - **MCP servers (external tools):**
   - Add servers in **Settings → Tools & MCP servers** (a command like `npx -y rea-agents mcp`, or an `https://` URL).
   - Their tools join Qwen's toolset as `mcp__<server>__<tool>`. Like the other extra tools, Qwen loads them with `tool_search` only when a task needs them, so a big server doesn't crowd the tool list.

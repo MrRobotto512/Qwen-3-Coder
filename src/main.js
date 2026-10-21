@@ -36,6 +36,7 @@ const DEFAULT_SETTINGS = {
   maxSteps: 60, // how many tool rounds the agent may take before stopping
   maxResponseTokens: 4096, // cap on reply length for cloud providers (max_tokens); 0 = no cap
   keepAlive: '-1', // how long Ollama keeps the model loaded: -1 = forever, '5m', '0' = unload now
+  heavy: { enabled: false, provider: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKey: '', model: 'gemini-2.5-flash' },
   webResearch: true, // lets the agent use web_search and fetch_url
   searchProvider: 'duckduckgo', // duckduckgo | brave | searxng
   searchApiKey: '',
@@ -373,7 +374,9 @@ ipcMain.handle('chat:abort', (_e, id) => {
 // Streams one completion. Deltas are pushed to the renderer as they arrive;
 // the resolved value is the full assistant turn (text + any tool calls).
 ipcMain.handle('chat:stream', async (event, id, payload) => {
-  const s = loadSettings();
+  // payload.override (optional) runs this one request on a different provider/model (the heavy
+  // model) without changing the saved settings.
+  const s = { ...loadSettings(), ...(payload.override || {}) };
   const controller = new AbortController();
   chatControllers.set(id, controller);
   const send = (type, data) => {
