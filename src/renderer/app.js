@@ -138,6 +138,7 @@ require(['vs/editor/editor.main'], async () => {
   checkConnection();
   initUpdates();
   initMcp();
+  await pickDefaultModel();
 
   if (state.settings.lastWorkspace) await openWorkspace(state.settings.lastWorkspace, true);
   renderAll();
@@ -3354,6 +3355,7 @@ function openSettings() {
 async function saveSettingsFromUi() {
   const patch = {};
   for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'approvalMode', 'searchProvider', 'searchApiKey', 'searxngUrl']) patch[k] = $(`#s-${k}`).value.trim();
+  patch.modelPicked = true;
   patch.webResearch = $('#s-webResearch').checked;
   patch.allowPrivateFetch = $('#s-allowPrivateFetch').checked;
   patch.temperature = parseFloat($('#s-temperature').value) || 0;
@@ -3387,6 +3389,21 @@ async function fetchModels() {
     out.className = 'hint bad';
     out.textContent = `Could not connect: ${e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}`;
   }
+}
+
+// On first run, set the model to the one recommended for this PC instead of a hardcoded default.
+async function pickDefaultModel() {
+  if (state.settings.modelPicked || state.settings.model) return;
+  let model = '';
+  try {
+    const { recommended } = recommendModels(await api.systemSpecs());
+    model = recommended?.id || '';
+  } catch {
+    /* hardware probe failed */
+  }
+  model = model || 'qwen2.5-coder:7b';
+  state.settings = await api.setSettings({ model, modelPicked: true });
+  applySettingsToUi();
 }
 
 async function checkConnection() {
@@ -3646,7 +3663,7 @@ async function showModelMenu(anchor) {
     label: id,
     checked: id === state.settings.model,
     onClick: async () => {
-      state.settings = await api.setSettings({ model: id });
+      state.settings = await api.setSettings({ model: id, modelPicked: true });
       applySettingsToUi();
       checkConnection();
       flash(`Model: ${id}`);
@@ -3871,7 +3888,7 @@ async function downloadModel(m) {
 
 async function useModel(m) {
   const base = state.tags?.base || 'http://localhost:11434';
-  const patch = { provider: 'ollama', baseUrl: `${base}/v1`, model: m.id };
+  const patch = { provider: 'ollama', baseUrl: `${base}/v1`, model: m.id, modelPicked: true };
   if (m.ctx) patch.contextLength = m.ctx;
   state.settings = await api.setSettings(patch);
   applySettingsToUi();

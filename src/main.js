@@ -20,7 +20,7 @@ const DEFAULT_SETTINGS = {
   provider: 'ollama',
   baseUrl: 'http://localhost:11434/v1',
   apiKey: '',
-  model: 'qwen2.5-coder:7b',
+  model: '', // chosen on first run from the hardware recommendation, else the user's pick
   temperature: 0.2,
   agentMode: true,
   // 'ask': approve every edit and command; 'edits': edits apply automatically, commands ask
@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   followAgent: true,
   contextLength: 32768,
   recentWorkspaces: [],
+  modelPicked: false, // true once a model has been chosen (auto or by the user)
   autoCheckUpdates: true,
   maxSteps: 60, // how many tool rounds the agent may take before stopping
   maxResponseTokens: 4096, // cap on reply length for cloud providers (max_tokens); 0 = no cap
