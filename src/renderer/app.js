@@ -1556,6 +1556,7 @@ function systemPrompt(c) {
       '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
       '- Paths are relative to the project root and use forward slashes.',
       '- Tool results come from the tools you call, not from the user. Keep working until the task is done instead of stopping to describe what you will do next.',
+      '- To run a command or use a tool, actually CALL the tool — do not write the command, the tool name or its arguments in a Markdown code block or in prose. Text and code blocks are only shown to the user; they never run. For example, to install software call the install_app tool with an id argument; do not type `install_app "…"` as if it were a shell command. To run a shell command, call run_command with the command. If your reply contains a command you want executed, you made a mistake: issue it as a tool call instead.',
       '- A message may end with a <system-reminder> from the app (not the user) describing the editor and task state. Use it as context; never reply to it directly.',
       '- If the user rejects an edit or command, do not retry it; ask what they want instead.',
       '- Make focused, minimal changes that match the existing code style.',
