@@ -439,6 +439,128 @@ function recordChange(c, path, before, after) {
   saveConv(c);
 }
 
+// Runs a git command in the project root through the shared command IPC.
+async function git(cmd) {
+  return api.runCommand(cmd);
+}
+
+async function isGitRepo() {
+  const r = await git('git rev-parse --is-inside-work-tree');
+  return r.code === 0 && /true/.test(r.output);
+}
+
+// Stages everything, asks the model for a Conventional Commits message from the diff, shows it
+// in an editable card, and commits on approve.
+async function commitFlow() {
+  if (!requireWorkspace() || state.committing) return;
+  if (!(await isGitRepo())) {
+    if (!confirm('This folder is not a git repository. Run "git init" here?')) return;
+    const init = await api.gitInit();
+    if (!init.ok) return alert(`git init failed:
+${init.output}`);
+  }
+  const status = await git('git status --porcelain');
+  if (status.code !== 0) return alert(`git failed:
+${status.output}`);
+  if (!status.output.trim()) return flash('Nothing to commit — the working tree is clean.');
+
+  state.committing = true;
+  showView('changes');
+  const card = el('div', { class: 'commit-card' }, el('div', { class: 'commit-head' }, iconEl('gitCommit'), el('span', { text: 'Writing a commit message…' }), el('span', { class: 'spinner' })));
+  $('#changes-list').prepend(card);
+  try {
+    // Stage everything so new files show in the diff, then summarize it for the model.
+    await git('git add -A');
+    const diff = (await git('git --no-pager diff --cached --stat')).output + '\n\n' + (await git('git --no-pager diff --cached')).output;
+    const message = await generateCommitMessage(diff.slice(0, 12000), status.output);
+    renderCommitCard(card, message);
+  } catch (e) {
+    card.remove();
+    state.committing = false;
+    alert(`Could not prepare the commit: ${cleanError(e)}`);
+  }
+}
+
+async function generateCommitMessage(diff, porcelain) {
+  const res = await api.chatStream(`commit${Date.now()}`, {
+    messages: [
+      { role: 'system', content: 'You write Conventional Commits messages. Reply with only the commit message: a subject line "type(scope): summary" under 72 chars (types: feat, fix, docs, refactor, test, chore, build), optionally a blank line and a short body of what changed and why. No backticks, no preamble.' },
+      { role: 'user', content: `Write a commit message for these staged changes.
+
+Changed files:
+${porcelain}
+
+Diff:
+${diff}` }
+    ]
+  });
+  const msg = res.ok ? stripThink(res.content || '').replace(/^```[\w]*\n?|```$/g, '').trim() : '';
+  return msg || 'Update project files';
+}
+
+function renderCommitCard(card, message) {
+  const box = el('textarea', { class: 'commit-msg', spellcheck: 'true' });
+  box.value = message;
+  const done = (committed) => {
+    card.remove();
+    state.committing = false;
+    if (committed) renderChanges();
+  };
+  card.replaceChildren(
+    el('div', { class: 'commit-head' }, iconEl('gitCommit'), el('span', { text: 'Commit message (editable)' })),
+    box,
+    el('div', { class: 'btns' },
+      el('button', { class: 'ghost', onclick: () => done(false) }, 'Cancel'),
+      el('button', { class: 'primary', onclick: async (e) => {
+        const msg = box.value.trim();
+        if (!msg) return;
+        e.currentTarget.disabled = true;
+        const r = await api.gitCommit(msg);
+        if (r.ok) {
+          flash('Committed');
+          toast({ icon: 'check', text: [el('b', { text: 'Committed.' }), ' ' + r.output.split('\n')[0]], actions: [{ label: 'Push', primary: true, onClick: pushFlow }], timeout: 15000 });
+          done(true);
+        } else {
+          e.currentTarget.disabled = false;
+          alert(`git commit failed:\n${r.output}`);
+        }
+      } }, iconEl('gitCommit'), 'Commit'))
+  );
+  box.focus();
+  box.setSelectionRange(message.length, message.length);
+  box.scrollIntoView({ block: 'nearest' });
+}
+
+async function pushFlow() {
+  if (!requireWorkspace()) return;
+  if (!(await isGitRepo())) return alert('This folder is not a git repository yet.');
+  const branch = (await git('git rev-parse --abbrev-ref HEAD')).output.trim() || 'HEAD';
+  const remote = (await git('git remote')).output.trim().split(/\s+/)[0];
+  if (!remote) return alert('No git remote is set. Add one first, e.g. git remote add origin <url>.');
+  if (!confirm(`Push ${branch} to ${remote}? This publishes your commits.`)) return;
+  flash(`Pushing ${branch} to ${remote}…`);
+  const hasUpstream = (await git('git rev-parse --abbrev-ref --symbolic-full-name @{u}')).code === 0;
+  const r = await git(hasUpstream ? `git push ${remote} ${branch}` : `git push -u ${remote} ${branch}`);
+  if (r.code === 0) toast({ icon: 'check', text: [el('b', { text: 'Pushed.' }), ` ${branch} → ${remote}`], timeout: 12000 });
+  else alert(`git push failed:\n${r.output}`);
+}
+
+async function cloneFlow() {
+  const url = await askInput('Clone a GitHub repository', 'https://github.com/owner/repo.git');
+  if (!url) return;
+  flash('Cloning…');
+  let r;
+  try {
+    r = await api.gitClone(url.trim());
+  } catch (e) {
+    return alert(cleanError(e));
+  }
+  if (r.cancelled) return;
+  if (!r.ok) return alert(`git clone failed:\n${r.output}`);
+  await openWorkspace(r.dir);
+  flash(`Cloned into ${r.dir}`);
+}
+
 function renderChanges() {
   const changes = state.conv?.changes || new Map();
   const n = changes.size;
@@ -446,6 +568,8 @@ function renderChanges() {
   badge.textContent = String(n);
   badge.classList.toggle('hidden', !n);
   $('#btn-revert-all').classList.toggle('hidden', !n);
+  $('#btn-commit').classList.toggle('hidden', !state.ws);
+  $('#btn-push').classList.toggle('hidden', !state.ws);
   const list = $('#changes-list');
   if (!n) {
     list.replaceChildren(el('div', { class: 'empty-note', text: 'Files Qwen creates or edits in this conversation show up here. Click one to see the diff, or revert it.' }));
@@ -797,8 +921,10 @@ function renderHome() {
       el('div', { class: 'hero' },
         el('span', { class: 'logo', text: 'Q' }),
         el('h1', { text: 'Qwen Workspace' }),
-        el('p', { text: 'Open a project folder, then ask Qwen to build, fix or explain your code.' }),
-        el('button', { class: 'primary', onclick: pickWorkspace }, iconEl('folderOpen'), 'Open Folder'))
+        el('p', { text: 'Open a project folder, or clone one from GitHub, then ask Qwen to build, fix or explain your code.' }),
+        el('div', { class: 'hero-actions' },
+          el('button', { class: 'primary', onclick: pickWorkspace }, iconEl('folderOpen'), 'Open Folder'),
+          el('button', { class: 'ghost', onclick: cloneFlow }, iconEl('gitCommit'), 'Clone from GitHub')))
     );
     if (recent.length) {
       inner.append(
@@ -3992,6 +4118,8 @@ function bindUi() {
     renderTree();
   };
   $('#btn-revert-all').onclick = revertAll;
+  $('#btn-commit').onclick = commitFlow;
+  $('#btn-push').onclick = pushFlow;
 
   $('#search-input').oninput = () => {
     clearTimeout(searchTimer);

@@ -982,3 +982,60 @@ ipcMain.handle('templates:install', async (_e, id) => {
   }
   return { written, skipped };
 });
+
+// ---------- git helpers ----------
+function runGit(args, cwd, timeout = 120_000) {
+  return new Promise((resolve) => {
+    const child = spawn('git', args, { cwd, windowsHide: true, env: process.env });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    const timer = setTimeout(() => killTree(child), timeout);
+    child.on('error', (e) => resolve({ code: -1, output: `${out}\n${e.message}` }));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, output: out.trim() });
+    });
+  });
+}
+
+// Stages everything and commits with the given message via a temp file, so multi-line and
+// quoted messages are passed safely (no shell escaping).
+ipcMain.handle('git:commit', async (_e, message) => {
+  const cwd = resolveInWorkspace('.');
+  const msg = String(message || '').trim();
+  if (!msg) return { ok: false, output: 'Empty commit message.' };
+  const add = await runGit(['add', '-A'], cwd);
+  if (add.code !== 0) return { ok: false, output: add.output };
+  const tmp = path.join(app.getPath('userData'), `commit-msg-${Date.now()}.txt`);
+  await fsp.writeFile(tmp, msg + '\n', 'utf8');
+  try {
+    const r = await runGit(['commit', '-F', tmp], cwd);
+    return { ok: r.code === 0, output: r.output };
+  } finally {
+    fsp.rm(tmp, { force: true }).catch(() => {});
+  }
+});
+
+ipcMain.handle('git:init', async () => {
+  const r = await runGit(['init'], resolveInWorkspace('.'));
+  return { ok: r.code === 0, output: r.output };
+});
+
+// Clones a repo into a folder the user picks, and returns the new project path to open.
+ipcMain.handle('git:clone', async (_e, url) => {
+  const u = String(url || '').trim();
+  if (!/^(https:\/\/|git@)[\w.@:/~-]+$/.test(u)) throw new Error('That does not look like a git URL.');
+  const r = await dialog.showOpenDialog(mainWindow, { title: 'Choose where to put the cloned repo', properties: ['openDirectory', 'createDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return { cancelled: true };
+  const parent = r.filePaths[0];
+  const name = (u.replace(/\.git$/, '').split(/[/\\]/).pop() || 'repo').replace(/[^\w.-]/g, '');
+  const dest = path.join(parent, name);
+  try {
+    if (fs.existsSync(dest) && fs.readdirSync(dest).length) return { ok: false, output: `${dest} already exists and is not empty.` };
+  } catch {
+    /* ignore */
+  }
+  const res = await runGit(['clone', u, dest], parent, 10 * 60_000);
+  return { ok: res.code === 0, dir: res.code === 0 ? dest : null, output: res.output };
+});
