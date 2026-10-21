@@ -1551,6 +1551,8 @@ function systemPrompt(c) {
       '- Long files come back a page at a time; read the next page only when you need it, instead of re-reading the whole file.',
       '- For tasks with 3 or more steps, keep a plan with todo_write and update it as you finish each step.',
       '- When you need several independent lookups (reads, searches, listings), request them all in the same reply; they run in parallel. Edits and commands run one at a time, in the order you give them.',
+      '- Install what the task needs instead of asking the user to do it by hand: when a command fails because a program is "not found" or "not recognized" (a compiler, SDK, CLI or build tool), install the missing tool with install_app (a winget id like "OpenJS.NodeJS" or "Rustlang.Rustup", or a plain name) — or install_git for Git — then retry.',
+      '- To build or run a project, follow its own documented steps (its README and package.json scripts) rather than inventing a raw build command. If a required tool needs a reboot, admin rights or manual setup (for example Docker Desktop with WSL2), install and do what you can, then tell the user exactly what is left for them. If the project already ships a prebuilt download (a release asset) that meets the request, point the user to it instead of building from source.',
       '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
       '- Paths are relative to the project root and use forward slashes.',
       '- Tool results come from the tools you call, not from the user. Keep working until the task is done instead of stopping to describe what you will do next.',
