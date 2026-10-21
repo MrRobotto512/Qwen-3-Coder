@@ -34,6 +34,7 @@ const DEFAULT_SETTINGS = {
   autoCheckUpdates: true,
   maxSteps: 60, // how many tool rounds the agent may take before stopping
   maxResponseTokens: 4096, // cap on reply length for cloud providers (max_tokens); 0 = no cap
+  keepAlive: '-1', // how long Ollama keeps the model loaded: -1 = forever, '5m', '0' = unload now
   webResearch: true, // lets the agent use web_search and fetch_url
   searchProvider: 'duckduckgo', // duckduckgo | brave | searxng
   searchApiKey: '',
@@ -513,6 +514,14 @@ async function isOllama(s) {
   return ollamaCache.get(root);
 }
 
+// Ollama accepts a number of seconds or a duration string ("-1", "5m", "30"). Pass numbers
+// through, and "-1" as the number -1 (stay loaded) so a stray string isn't misread.
+function parseKeepAlive(v) {
+  const str = String(v ?? '-1').trim();
+  if (/^-?\d+$/.test(str)) return Number(str);
+  return str || -1;
+}
+
 function toOllamaMessages(messages) {
   const toolNames = new Map();
   return messages.map((m) => {
@@ -541,6 +550,8 @@ async function streamOllama(s, payload, signal, send) {
     model: s.model,
     messages: toOllamaMessages(payload.messages),
     stream: true,
+    // Keep the model resident so the next message doesn't wait for a multi-GB reload.
+    keep_alive: parseKeepAlive(s.keepAlive),
     options: { temperature: Number(s.temperature), num_ctx: contextLength }
   };
   if (payload.tools?.length) body.tools = payload.tools;

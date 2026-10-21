@@ -198,6 +198,10 @@
         <input id="s-maxResponseTokens" type="number" min="0" step="256" />
         <span class="hint">Caps each reply's length for OpenRouter / DashScope, so they don't reserve (and charge for) the model's full output. 4096 is plenty for coding. 0 = no cap. Does not apply to Ollama or LM Studio.</span>
       </label>
+      <label>Keep model loaded (Ollama)
+        <input id="s-keepAlive" spellcheck="false" placeholder="-1" />
+        <span class="hint">How long Ollama keeps the model in memory after a reply. <code>-1</code> keeps it loaded (no reload wait); <code>5m</code> is Ollama's default; <code>0</code> unloads immediately.</span>
+      </label>
       <div class="hint">The context window is how much of the conversation Qwen can see. 32768 suits agent mode; lower it if Ollama runs out of GPU memory. To go past 32K, use a long-context (YaRN) build from Models for this PC.</div>
 
       <div class="section-title">Agent</div>

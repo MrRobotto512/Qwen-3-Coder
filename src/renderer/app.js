@@ -3309,7 +3309,7 @@ function renderSearchFields() {
 
 function openSettings() {
   const s = state.settings;
-  for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize', 'contextLength', 'maxResponseTokens', 'searchProvider', 'searchApiKey', 'searxngUrl']) $(`#s-${k}`).value = s[k] ?? '';
+  for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize', 'contextLength', 'maxResponseTokens', 'keepAlive', 'searchProvider', 'searchApiKey', 'searxngUrl']) $(`#s-${k}`).value = s[k] ?? '';
   $('#s-webResearch').checked = s.webResearch !== false;
   $('#s-allowPrivateFetch').checked = !!s.allowPrivateFetch;
   renderSearchFields();
@@ -3334,6 +3334,7 @@ async function saveSettingsFromUi() {
   patch.fontSize = parseInt($('#s-fontSize').value, 10) || 14;
   patch.contextLength = Math.max(2048, parseInt($('#s-contextLength').value, 10) || 32768);
   patch.maxResponseTokens = Math.max(0, parseInt($('#s-maxResponseTokens').value, 10) || 0);
+  patch.keepAlive = ($('#s-keepAlive').value.trim() || '-1');
   patch.allowedCommands = $('#s-allowedCommands').value.split(',').map((x) => x.trim()).filter(Boolean);
   patch.maxSteps = Math.min(200, Math.max(10, parseInt($('#s-maxSteps').value, 10) || DEFAULT_MAX_STEPS));
   for (const k of ['agentMode', 'includeCurrentFile', 'followAgent', 'autoCheckUpdates']) patch[k] = $(`#s-${k}`).checked;
