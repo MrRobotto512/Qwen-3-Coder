@@ -81,6 +81,40 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - When a conversation nears the context window, older turns are summarized automatically. Click the context meter to summarize now.
 - **Loop protection:** if Qwen repeats the exact same lookup, the app skips it and tells Qwen to move on. If it keeps stalling, Qwen is nudged to finish or ask a question. A task stops after a set number of steps (Settings → Agent, default 60) so a loop can't run forever; the stop message has a one-click **Continue**.
 
+## Headless agent (hand work to Qwen from Claude)
+
+The same agent can run with no window, as a coding worker that another agent (for example
+Claude Code) hands tasks to. It lives in `src/core/` and is driven by `bin/qwen-agent.js`.
+The desktop app is unchanged.
+
+```
+qwen-agent run spec.md --repo <path>      # one task, foreground
+qwen-agent run --task "..." --gate "npm test" --allow src/
+qwen-agent mcp                            # MCP server: delegate_task, get_result, list_tasks, cancel_task
+qwen-agent check                          # test each configured model
+```
+
+How a task runs: the agent works in an isolated `git worktree` on its own branch (your
+checkout is never touched), runs the spec's **gates** (test/lint commands), is sent the
+failures to fix for a few rounds, then commits and writes a structured `result.json`
+(status, files, gate results, diff, the agent's summary). Nothing is merged or pushed.
+
+**Setup**
+
+1. `npm install`, then `node bin/qwen-agent.js init` to write `~/.qwen-agent/config.json`.
+2. Edit it: list model profiles in order. The first is tried first, later ones are the
+   fallback. The sample uses hosted Qwen3-Coder on OpenRouter (key in the
+   `OPENROUTER_API_KEY` environment variable, never in the file) with a local Ollama model
+   as fallback. With no config file, the desktop app's own saved model settings are used.
+3. `node bin/qwen-agent.js check` confirms every profile answers.
+4. Let Claude Code use it: `claude mcp add qwen-agent -- node /path/to/Qwen-3-Coder/bin/qwen-agent.js mcp`
+   (use the full Windows path on Windows). Optionally restrict repositories with
+   `QWEN_AGENT_REPOS` (a `;`- or `:`-separated list).
+
+See [HANDOFF.md](HANDOFF.md) for what to delegate, how to write a spec, how to review the
+result, and the safety rules the runner enforces. [examples/](examples/) has a sample spec.
+Tests: `npm test` (uses a scripted mock model, so no API key or GPU is needed).
+
 ## 1. Get a Qwen model running
 
 ### Option A: Ollama (free, local, private)
@@ -186,7 +220,10 @@ Steps, conventions and gotchas go here. Other files in the folder can be loaded 
 ## Project layout
 
 ```
+bin/
+  qwen-agent.js      Headless CLI and MCP entry point
 src/
+  core/              Headless agent: tools, model streaming + fallback, agent loop, runner, MCP server
   main.js            Electron main process: window, file system, commands, streaming model API
   preload.js         Safe bridge exposed to the UI as window.api
   renderer/

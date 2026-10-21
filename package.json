@@ -6,7 +6,9 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win nsis portable zip --x64",
-    "dist:zip": "electron-builder --win zip"
+    "dist:zip": "electron-builder --win zip",
+    "test": "node --test \"test/*.test.js\"",
+    "agent": "node bin/qwen-agent.js"
   },
   "author": "",
   "dependencies": {
@@ -14,7 +16,8 @@
     "dompurify": "^3.4.17",
     "electron-updater": "^6.8.9",
     "marked": "^18.1.1",
-    "monaco-editor": "^0.57.0"
+    "monaco-editor": "^0.57.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "electron": "^44.9.0",
@@ -26,6 +29,7 @@
     "productName": "Qwen Workspace",
     "files": [
       "src/**/*",
+      "bin/**/*",
       "templates/**/*",
       "package.json",
       "!node_modules/monaco-editor/{dev,esm,min-maps}/**",
@@ -62,5 +66,11 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/MrRobotto512/Qwen-3-Coder.git"
+  },
+  "bin": {
+    "qwen-agent": "bin/qwen-agent.js"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
