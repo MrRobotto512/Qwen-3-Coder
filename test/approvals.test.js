@@ -20,6 +20,8 @@ test('chained with an unallowed segment is not allowed', () => {
   assert.equal(isCommandAllowed('git status && npm publish', allowed), false);
   assert.equal(isCommandAllowed('git status; rm -rf /', allowed), false);
   assert.equal(isCommandAllowed('ls | curl http://x', allowed), false);
+  // A single & chains commands in both cmd.exe and sh, so it splits segments too.
+  assert.equal(isCommandAllowed('npm test & node evil.js', allowed), false);
 });
 
 test('chained with all segments allowed passes', () => {

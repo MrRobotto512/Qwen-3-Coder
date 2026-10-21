@@ -80,12 +80,32 @@ function parseDuckDuckGo(html) {
 // Web content can carry instructions aimed at the agent, so by default it may not reach
 // services on this machine or the local network.
 function isPrivateHost(host) {
-  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h === '::1' || h === '0.0.0.0') return true;
-  if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-  if (/^(fc|fd)[0-9a-f]{2}:/.test(h) || /^fe80:/.test(h)) return true;
+  const h = String(host).replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  // Canonicalize numeric IPv4 forms first (decimal like 2130706433, hex 0x7f000001, octal
+  // 0177.0.0.1, short forms like 127.1), so an encoded loopback address can't slip past.
+  const ip = canonicalIPv4(h);
+  if (ip) {
+    if (/^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(ip)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+    return false;
+  }
+  if (h === '::1' || /^(fc|fd)[0-9a-f]{2}:/.test(h) || /^fe80:/.test(h)) return true;
+  if (h.startsWith('::ffff:')) return isPrivateHost(h.slice(7)); // IPv4-mapped IPv6
   return false;
+}
+
+// Any inet_aton-style IPv4 literal (1 to 4 dot-separated decimal/octal/hex numbers) to the
+// canonical dotted-decimal form, or null when the host is not a numeric IPv4.
+function canonicalIPv4(h) {
+  if (!/^(0x[0-9a-f]+|\d+)(\.(0x[0-9a-f]+|\d+)){0,3}$/.test(h)) return null;
+  const parts = h.split('.').map((p) => (/^0x/.test(p) ? parseInt(p, 16) : /^0\d/.test(p) ? parseInt(p, 8) : parseInt(p, 10)));
+  if (parts.some((n) => !Number.isFinite(n))) return null;
+  const last = parts.pop();
+  if (parts.some((n) => n > 255) || last >= 256 ** (4 - parts.length)) return null;
+  let value = last;
+  parts.forEach((n, i) => (value += n * 256 ** (3 - i)));
+  return [value >>> 24, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join('.');
 }
 
 // github.com/<owner>/<repo>/blob/<ref>/<path> → the raw file, which is far easier to read.

@@ -10,7 +10,7 @@ const DANGEROUS_COMMAND = /\b(rm\s+-[a-z]*[rf]|rmdir|rd\s+\/s|del\s|erase\s|form
 // Shell metacharacters that chain commands, redirect output, spawn subshells or expand
 // variables. A command using any of these is split into segments and every segment must be
 // allow-listed, so an always-allowed prefix can't smuggle a second command after `&&`.
-const SHELL_SPLIT = /&&|\|\||;|\||\n/;
+const SHELL_SPLIT = /&&|\|\||;|\||&|\n/;
 const SHELL_META = /[>`]|\$\(|%[^%\s]+%/;
 
 function commandSegments(cmd) {

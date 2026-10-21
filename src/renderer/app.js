@@ -1,4 +1,4 @@
-/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge, MODEL_CATALOG, recommendModels, recommendLongContext, catalogEntryFor, describeSpecs, formatGB, formatContext, DANGEROUS_COMMAND, commandNeedsApproval, ToolParse */
+/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge, MODEL_CATALOG, FIT_INFO, recommendModels, recommendLongContext, catalogEntryFor, describeSpecs, formatGB, formatContext, DANGEROUS_COMMAND, commandNeedsApproval, ToolParse */
 'use strict';
 
 // `api` is the bridge exposed by preload.js (window.api).
@@ -2262,7 +2262,11 @@ async function renameConv(id) {
 async function openConvQuiet(id) {
   try {
     const data = await api.convLoad(id);
-    const c = Object.assign(createConv(), data, { changes: new Map(data.changes || []) });
+    const c = Object.assign(createConv(), data, {
+      changes: new Map(data.changes || []),
+      // A task that was running when the app closed can't still be running.
+      status: ['running', 'waiting'].includes(data.status) ? 'stopped' : data.status
+    });
     renderTranscript(c);
     state.convs.set(id, c);
     return c;
@@ -2549,7 +2553,7 @@ async function runConversation(c) {
     }
   }
   addStopNotice(c);
-  return false;
+  return true; // unfinished: show the task as failed, not done
 }
 
 // Runs a tool, unless it is an identical repeat of an earlier read-only call this run — then it
@@ -3610,8 +3614,8 @@ async function fetchModels() {
   const out = $('#s-test-result');
   out.className = 'hint';
   out.textContent = 'Connecting…';
-  // Save the connection fields first so the main process uses them.
-  await api.setSettings({ baseUrl: $('#s-baseUrl').value.trim(), apiKey: $('#s-apiKey').value.trim(), provider: $('#s-provider').value });
+  // Save the connection fields first so the main process uses them (and keep state in sync).
+  state.settings = await api.setSettings({ baseUrl: $('#s-baseUrl').value.trim(), apiKey: $('#s-apiKey').value.trim(), provider: $('#s-provider').value });
   try {
     const models = await api.listModels();
     $('#model-list').replaceChildren(...models.map((m) => el('option', { value: m })));
@@ -4013,13 +4017,6 @@ async function resolveHf(repo) {
   if (!$('#models-modal').classList.contains('hidden') && state.modelsMode === 'long') renderModels();
 }
 
-const FIT_TEXT = {
-  gpu: 'Fast · fits in GPU memory',
-  mixed: 'Usable · partly on CPU',
-  cpu: 'Slow · mostly on CPU',
-  none: 'Too large for this PC'
-};
-
 function modelRow(m, isRec, isStrong) {
   const installed = !!m.id && installedNames().has(m.id);
   const inUse = installed && state.settings.provider === 'ollama' && state.settings.model === m.id && (!m.ctxDetail || state.settings.contextLength === m.ctx);
@@ -4032,7 +4029,7 @@ function modelRow(m, isRec, isStrong) {
       isStrong ? el('span', { class: 'tagb strong', text: 'Most capable that runs' }) : null,
       inUse ? el('span', { class: 'tagb use', text: 'In use' }) : installed ? el('span', { class: 'tagb inst', text: 'Downloaded' }) : null),
     el('div', { class: 'm-facts' },
-      el('span', { class: `fit ${m.fit}`, text: FIT_TEXT[m.fit] }),
+      el('span', { class: `fit ${m.fit}`, text: FIT_INFO[m.fit].label }),
       el('span', { text: `${formatGB(m.sizeGB)} download` }),
       el('span', { text: `${formatContext(m.ctx)} context`, title: `Needs about ${formatGB(m.needGB)} of memory at this context size` }, m.ctxDetail ? el('span', { class: 'ctx-detail', text: ` (${m.ctxDetail})` }) : null),
       el('span', { text: `Agent: ${m.agent}` })),

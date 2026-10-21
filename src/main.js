@@ -79,7 +79,8 @@ function resolveInWorkspace(p) {
   if (!workspaceRoot) throw new Error('No workspace folder is open.');
   const abs = path.resolve(workspaceRoot, p || '.');
   const rel = path.relative(workspaceRoot, abs);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  // rel === '..' or '../x' means outside; a name merely starting with '..' (e.g. "..config") is fine.
+  if (rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) {
     throw new Error(`Path is outside the workspace: ${p}`);
   }
   return abs;
@@ -506,14 +507,14 @@ function ollamaRoot(s) {
 async function isOllama(s) {
   const root = ollamaRoot(s);
   if (!ollamaCache.has(root)) {
-    let yes = false;
     try {
       const r = await fetch(`${root}/api/version`, { signal: AbortSignal.timeout(3000) });
-      yes = r.ok && typeof (await r.json()).version === 'string';
+      // Only cache an answer the server actually gave; an unreachable server may be an
+      // Ollama that just isn't running yet, so check again next time.
+      ollamaCache.set(root, r.ok && typeof (await r.json()).version === 'string');
     } catch {
-      /* not Ollama, or not reachable */
+      return false; /* not reachable right now — don't cache */
     }
-    ollamaCache.set(root, yes);
   }
   return ollamaCache.get(root);
 }
@@ -881,7 +882,8 @@ ipcMain.handle('skills:read', async (_e, id, file) => {
   if (!root || !/^[\w. -]+$/.test(dirName || '')) throw new Error('Unknown skill');
   const base = path.join(root, dirName);
   const target = path.resolve(base, file || 'SKILL.md');
-  if (path.relative(base, target).startsWith('..')) throw new Error('That file is outside the skill folder');
+  const relSkill = path.relative(base, target);
+  if (relSkill === '..' || relSkill.startsWith('..' + path.sep) || path.isAbsolute(relSkill)) throw new Error('That file is outside the skill folder');
   const st = await fsp.stat(target);
   if (st.size > 200 * 1024) throw new Error('Skill file is too large');
   const text = await fsp.readFile(target, 'utf8');
@@ -1042,7 +1044,12 @@ function commandEnv() {
   const extra = [dir, path.join(root, 'bin'), path.join(root, 'mingw64', 'bin'), path.join(root, 'usr', 'bin')].filter(safeExists);
   if (!extra.length) return process.env;
   const sep = process.platform === 'win32' ? ';' : ':';
-  return { ...process.env, PATH: extra.join(sep) + sep + (process.env.PATH || '') };
+  // On Windows the variable is usually stored as "Path"; writing a second "PATH" key would
+  // leave a duplicate and the prepended folders might be ignored. Reuse the existing key.
+  const env = { ...process.env };
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  env[key] = extra.join(sep) + sep + (env[key] || '');
+  return env;
 }
 
 // Is a working git reachable right now (portable, installed, or on PATH)?
