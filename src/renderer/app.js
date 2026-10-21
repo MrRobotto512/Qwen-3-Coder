@@ -205,7 +205,10 @@ function requireWorkspace() {
 function showFolderMenu(anchor) {
   const r = anchor.getBoundingClientRect();
   const recent = (state.settings.recentWorkspaces || []).filter((p) => p !== state.ws?.root);
-  const items = [{ label: 'Open Folder…', icon: 'folderOpen', detail: 'Ctrl+O', onClick: pickWorkspace }];
+  const items = [
+    { label: 'Open Folder…', icon: 'folderOpen', detail: 'Ctrl+O', onClick: pickWorkspace },
+    { label: 'Clone from GitHub…', icon: 'gitCommit', onClick: cloneFlow }
+  ];
   if (recent.length) items.push('-');
   for (const p of recent) items.push({ label: baseName(p), detail: p, icon: 'history', onClick: () => openWorkspace(p) });
   showMenu(r.left, r.bottom + 4, items);
