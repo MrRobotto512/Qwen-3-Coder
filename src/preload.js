@@ -70,6 +70,13 @@ contextBridge.exposeInMainWorld('api', {
   gitCommit: (message) => ipcRenderer.invoke('git:commit', message),
   gitInit: () => ipcRenderer.invoke('git:init'),
   gitClone: (url) => ipcRenderer.invoke('git:clone', url),
+  gitEnsure: () => ipcRenderer.invoke('git:ensure'),
+  gitInstall: () => ipcRenderer.invoke('git:install'),
+  onGitInstallProgress: (cb) => {
+    const fn = (_e, p) => cb(p);
+    ipcRenderer.on('git:install-progress', fn);
+    return () => ipcRenderer.removeListener('git:install-progress', fn);
+  },
 
   convList: (workspace) => ipcRenderer.invoke('conv:list', workspace),
   convLoad: (id) => ipcRenderer.invoke('conv:load', id),

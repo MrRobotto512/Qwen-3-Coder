@@ -318,7 +318,7 @@ ipcMain.handle('shell:reveal', (_e, rel) => shell.showItemInFolder(resolveInWork
 ipcMain.handle('cmd:run', (_e, command, timeoutMs = 120_000) => {
   const cwd = resolveInWorkspace('.');
   return new Promise((resolve) => {
-    const child = spawn(command, { cwd, shell: true, windowsHide: true, env: process.env });
+    const child = spawn(command, { cwd, shell: true, windowsHide: true, env: commandEnv() });
     let output = '';
     const append = (d) => {
       output += d.toString();
@@ -988,14 +988,145 @@ ipcMain.handle('templates:install', async (_e, id) => {
 });
 
 // ---------- git helpers ----------
+// Where a portable Git (MinGit) is unpacked if the app downloads one itself.
+function portableGitExe() {
+  return path.join(app.getPath('userData'), 'portable-git', 'cmd', 'git.exe');
+}
+
+// Resolve the git executable. Prefer a portable copy the app installed, then the standard
+// Windows install locations, then PATH — since Electron launched from Explorer may not have git
+// on PATH (e.g. Git was installed without the "add to PATH" option).
+let gitPathCache;
+function gitExe() {
+  if (gitPathCache && (gitPathCache === 'git' || safeExists(gitPathCache))) return gitPathCache;
+  gitPathCache = null;
+  if (process.platform === 'win32') {
+    const portable = portableGitExe();
+    if (safeExists(portable)) return (gitPathCache = portable);
+    const roots = [
+      process.env.ProgramFiles,
+      process.env['ProgramFiles(x86)'],
+      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')
+    ].filter(Boolean);
+    for (const root of roots) {
+      for (const sub of [['Git', 'cmd', 'git.exe'], ['Git', 'bin', 'git.exe']]) {
+        const p = path.join(root, ...sub);
+        if (safeExists(p)) return (gitPathCache = p);
+      }
+    }
+  }
+  // Don't cache the fallback: if git is installed later, a real path is found next call.
+  return 'git';
+}
+
+function safeExists(p) {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+}
+
+// Directory of the resolved git executable, or null when we're relying on PATH.
+function gitDir() {
+  const exe = gitExe();
+  return exe === 'git' ? null : path.dirname(exe);
+}
+
+// process.env with the resolved git's folders prepended to PATH, so shell commands (`git ...`
+// run via cmd:run) find a portable or non-PATH git the same way runGit does.
+function commandEnv() {
+  const dir = gitDir();
+  if (!dir) return process.env;
+  const root = path.dirname(dir); // the Git install root (parent of cmd/)
+  const extra = [dir, path.join(root, 'bin'), path.join(root, 'mingw64', 'bin'), path.join(root, 'usr', 'bin')].filter(safeExists);
+  if (!extra.length) return process.env;
+  const sep = process.platform === 'win32' ? ';' : ':';
+  return { ...process.env, PATH: extra.join(sep) + sep + (process.env.PATH || '') };
+}
+
+// Is a working git reachable right now (portable, installed, or on PATH)?
+function gitAvailable() {
+  return new Promise((resolve) => {
+    const child = spawn(gitExe(), ['--version'], { windowsHide: true, env: process.env });
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+}
+
+// Downloads MinGit (the minimal portable Git for Windows) and unpacks it into userData, so the
+// user doesn't have to install Git by hand. No admin rights, no PATH changes.
+async function installPortableGit(onProgress) {
+  if (process.platform !== 'win32') throw new Error('Automatic Git install is only available on Windows. Install Git from your package manager.');
+  onProgress?.({ phase: 'find' });
+  const rel = await fetch('https://api.github.com/repos/git-for-windows/git/releases/latest', {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Qwen-Workspace' },
+    signal: AbortSignal.timeout(20_000)
+  });
+  if (!rel.ok) throw new Error(`Couldn't reach GitHub to find Git (HTTP ${rel.status}).`);
+  const data = await rel.json();
+  const is64 = process.arch === 'x64' || process.arch === 'arm64';
+  // Prefer the standard MinGit zip (not the BusyBox variant) for the right architecture.
+  const assets = (data.assets || []).filter((a) => /^MinGit-.*\.zip$/i.test(a.name) && !/busybox/i.test(a.name));
+  const asset = assets.find((a) => (is64 ? /64-bit/i.test(a.name) : /32-bit/i.test(a.name))) || assets[0];
+  if (!asset) throw new Error('Could not find a MinGit download in the latest Git for Windows release.');
+
+  const dir = path.join(app.getPath('userData'), 'portable-git');
+  const zip = path.join(app.getPath('userData'), 'portable-git.zip');
+  await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+  await fsp.rm(zip, { force: true }).catch(() => {});
+
+  onProgress?.({ phase: 'download', percent: 0 });
+  const res = await fetch(asset.browser_download_url, { headers: { 'User-Agent': 'Qwen-Workspace' }, signal: AbortSignal.timeout(10 * 60_000) });
+  if (!res.ok || !res.body) throw new Error(`Download failed (HTTP ${res.status}).`);
+  const total = Number(res.headers.get('content-length')) || asset.size || 0;
+  let got = 0;
+  const handle = await fsp.open(zip, 'w');
+  try {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await handle.write(Buffer.from(value));
+      got += value.length;
+      if (total) onProgress?.({ phase: 'download', percent: Math.round((got / total) * 100), got, total });
+    }
+  } finally {
+    await handle.close();
+  }
+
+  onProgress?.({ phase: 'extract' });
+  await extractZip(zip, dir);
+  await fsp.rm(zip, { force: true }).catch(() => {});
+  gitPathCache = null;
+  const exe = portableGitExe();
+  if (!safeExists(exe)) throw new Error('Git was downloaded but could not be unpacked.');
+  gitPathCache = exe;
+  onProgress?.({ phase: 'done' });
+  return exe;
+}
+
+// Unzips with PowerShell's built-in Expand-Archive, so no extra dependency is needed.
+function extractZip(zip, dest) {
+  return new Promise((resolve, reject) => {
+    const ps = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${dest.replace(/'/g, "''")}' -Force`], { windowsHide: true });
+    let err = '';
+    ps.stderr.on('data', (d) => (err += d));
+    ps.on('error', (e) => reject(new Error(`Could not unpack the download: ${e.message}`)));
+    ps.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Could not unpack the download.${err ? ` ${err.trim()}` : ''}`))));
+  });
+}
+
+const GIT_MISSING = "Git isn't installed, or Qwen Workspace can't find it. Install Git from https://git-scm.com/download/win (keep the default options), then restart the app.";
+
 function runGit(args, cwd, timeout = 120_000) {
   return new Promise((resolve) => {
-    const child = spawn('git', args, { cwd, windowsHide: true, env: process.env });
+    const child = spawn(gitExe(), args, { cwd, windowsHide: true, env: process.env });
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
     const timer = setTimeout(() => killTree(child), timeout);
-    child.on('error', (e) => resolve({ code: -1, output: `${out}\n${e.message}` }));
+    child.on('error', (e) => resolve({ code: -1, output: e.code === 'ENOENT' ? GIT_MISSING : `${out}\n${e.message}`.trim() }));
     child.on('close', (code) => {
       clearTimeout(timer);
       resolve({ code, output: out.trim() });
@@ -1024,6 +1155,21 @@ ipcMain.handle('git:commit', async (_e, message) => {
 ipcMain.handle('git:init', async () => {
   const r = await runGit(['init'], resolveInWorkspace('.'));
   return { ok: r.code === 0, output: r.output };
+});
+
+// Reports whether a working git is reachable, so the UI can offer to install one if not.
+ipcMain.handle('git:ensure', async () => ({ ok: await gitAvailable(), canInstall: process.platform === 'win32' }));
+
+// Downloads and unpacks a portable Git, streaming progress to the renderer.
+ipcMain.handle('git:install', async (event) => {
+  try {
+    await installPortableGit((p) => {
+      if (!event.sender.isDestroyed()) event.sender.send('git:install-progress', p);
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, output: e.message };
+  }
 });
 
 // Clones a repo into a folder the user picks, and returns the new project path to open.

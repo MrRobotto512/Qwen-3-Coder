@@ -43,6 +43,7 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - Edits Qwen makes stay highlighted in the editor.
   - Edits that need your approval appear as a full-size diff with **Approve** / **Reject**.
 - **Changes panel:** every file the current conversation created or edited, with added/removed line counts. Click one to see its diff, or revert it. Reverting only undoes that conversation's changes.
+- **Git built in:** clone a repo from the home screen, and commit (with an AI-written message) and push from the Changes panel. If Git isn't on your PC, the app offers to download a portable copy into its own folder — no separate install and no admin rights — so clone, commit and push just work.
 - **Approval modes** (in the message box):
   - **Ask:** approve every edit and command.
   - **Auto-edit** (default): edits apply right away, and commands ask unless you've marked them "Always allow".
