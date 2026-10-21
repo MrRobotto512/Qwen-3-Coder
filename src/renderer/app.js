@@ -2636,6 +2636,8 @@ function addError(c, text, usedTools) {
     hint = '\n\nThis model may not support tool calling. Switch to "Chat" below the message box, or pick a tool-capable model such as qwen2.5-coder, qwen3 or qwen3-coder.';
   } else if (/connect|ECONNREFUSED|fetch failed/i.test(text)) {
     hint = `\n\nCheck Settings: is the base URL right and is the server running? For Ollama run "ollama serve" and "ollama pull ${state.settings.model}".`;
+  } else if (/402|more credits|requires more|insufficient|quota|billing/i.test(text)) {
+    hint = '\n\nYour provider account is out of credit for a request this size. Add credits (e.g. openrouter.ai/settings/credits), or lower "Max response tokens" in Settings so each reply reserves less.';
   } else if (/401|403|api key|unauthorized/i.test(text)) {
     hint = '\n\nCheck the API key in Settings.';
   }
@@ -3307,7 +3309,7 @@ function renderSearchFields() {
 
 function openSettings() {
   const s = state.settings;
-  for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize', 'contextLength', 'searchProvider', 'searchApiKey', 'searxngUrl']) $(`#s-${k}`).value = s[k] ?? '';
+  for (const k of ['provider', 'baseUrl', 'apiKey', 'model', 'temperature', 'fontSize', 'contextLength', 'maxResponseTokens', 'searchProvider', 'searchApiKey', 'searxngUrl']) $(`#s-${k}`).value = s[k] ?? '';
   $('#s-webResearch').checked = s.webResearch !== false;
   $('#s-allowPrivateFetch').checked = !!s.allowPrivateFetch;
   renderSearchFields();
@@ -3331,6 +3333,7 @@ async function saveSettingsFromUi() {
   patch.temperature = parseFloat($('#s-temperature').value) || 0;
   patch.fontSize = parseInt($('#s-fontSize').value, 10) || 14;
   patch.contextLength = Math.max(2048, parseInt($('#s-contextLength').value, 10) || 32768);
+  patch.maxResponseTokens = Math.max(0, parseInt($('#s-maxResponseTokens').value, 10) || 0);
   patch.allowedCommands = $('#s-allowedCommands').value.split(',').map((x) => x.trim()).filter(Boolean);
   patch.maxSteps = Math.min(200, Math.max(10, parseInt($('#s-maxSteps').value, 10) || DEFAULT_MAX_STEPS));
   for (const k of ['agentMode', 'includeCurrentFile', 'followAgent', 'autoCheckUpdates']) patch[k] = $(`#s-${k}`).checked;

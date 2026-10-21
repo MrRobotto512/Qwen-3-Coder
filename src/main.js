@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS = {
   recentWorkspaces: [],
   autoCheckUpdates: true,
   maxSteps: 60, // how many tool rounds the agent may take before stopping
+  maxResponseTokens: 4096, // cap on reply length for cloud providers (max_tokens); 0 = no cap
   webResearch: true, // lets the agent use web_search and fetch_url
   searchProvider: 'duckduckgo', // duckduckgo | brave | searxng
   searchApiKey: '',
@@ -393,6 +394,10 @@ ipcMain.handle('chat:stream', async (event, id, payload) => {
     stream: true,
     temperature: Number(s.temperature)
   };
+  // Cap the reply length so providers that bill per reserved token (e.g. OpenRouter) don't
+  // reserve the model's whole output capacity and reject the request on a small balance.
+  const cap = Number(s.maxResponseTokens);
+  if (cap > 0) body.max_tokens = cap;
   if (payload.tools?.length) body.tools = payload.tools;
 
   try {
