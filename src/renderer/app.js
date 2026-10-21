@@ -1310,6 +1310,21 @@ const CORE_TOOLS = [
       description: 'Run a shell command in the project root and return its output (non-interactive, 2 minute timeout). Use it to build, test, install packages or run scripts, instead of for reading or searching files.',
       parameters: { type: 'object', properties: { command: { type: 'string', description: 'The command line to run.' } }, required: ['command'] }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'install_app',
+      description: 'Install a Windows application with winget (the Windows Package Manager). Use this when the user asks to install an app (e.g. "install iTunes"). Pass the winget package id when you know it (e.g. "Apple.iTunes", "Google.Chrome", "VideoLAN.VLC", "Git.Git"), otherwise pass a name to search for. If several packages match the name, the result lists them so you can retry with an exact id. Needs the user\'s approval. For Git specifically, prefer install_git, which works even without winget.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Exact winget package id, e.g. "Apple.iTunes". Preferred when known.' },
+          name: { type: 'string', description: 'App name to install when you do not know the id, e.g. "itunes".' }
+        },
+        required: []
+      }
+    }
   }
 ];
 
@@ -1332,6 +1347,14 @@ const DEFERRED_TOOLS = [
         properties: { from: { type: 'string', description: 'Current path.' }, to: { type: 'string', description: 'New path; must not exist yet.' } },
         required: ['from', 'to']
       }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'install_git',
+      description: 'Install Git on this PC by downloading a portable Git into the app\'s own folder (no winget, no admin rights). Use this when Git is missing and a git command is needed, or when the user asks to install Git and winget is unavailable.',
+      parameters: { type: 'object', properties: {}, required: [] }
     }
   }
 ];
@@ -1458,6 +1481,8 @@ const TOOL_INFO = {
   write_file: { icon: 'filePlus', verb: 'Write', doing: 'Writing' },
   edit_file: { icon: 'pencil', verb: 'Edit', doing: 'Editing' },
   run_command: { icon: 'terminal', verb: 'Run', doing: 'Running' },
+  install_app: { icon: 'download', verb: 'Install', doing: 'Installing' },
+  install_git: { icon: 'download', verb: 'Install', doing: 'Installing Git' },
   todo_write: { icon: 'list', verb: 'Plan', doing: 'Updating the plan' },
   ask_user: { icon: 'chat', verb: 'Question', doing: 'Waiting for your answer to' },
   web_search: { icon: 'search', verb: 'Web search', doing: 'Searching the web for' },
@@ -1616,6 +1641,10 @@ function describeCall(name, args) {
       return { target: `${baseName(normPath(args.from))} → ${normPath(args.to)}`, title: `${args.from} → ${args.to}` };
     case 'load_skill':
       return { target: `${args.name || ''}${args.file ? ` · ${args.file}` : ''}` };
+    case 'install_app':
+      return { target: args.id || args.name || 'app' };
+    case 'install_git':
+      return { target: 'Git' };
     case 'consult_planner':
       return { target: `${heavyLabel()}: ${String(args.question || '').slice(0, 60)}`, title: args.question };
     case 'tool_search':
@@ -1901,6 +1930,61 @@ async function executeTool(c, call, row) {
         row.setBody(r.output || '(no output)');
         state.fileIndex = null;
         renderTree();
+        return { result: `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`, meta: `exit ${r.code}`, failed: r.code !== 0 };
+      }
+      case 'install_git': {
+        try {
+          if ((await api.gitEnsure()).ok) return { result: 'Git is already installed and available.', meta: 'done' };
+        } catch {
+          /* fall through and install */
+        }
+        if (needsApproval('command', 'install git')) {
+          const ok = await row.requestApproval({ kind: 'command', question: 'Download and install a portable Git (~50 MB)?', command: 'install Git (portable, into the app folder)', dangerous: false });
+          if (!ok) return { result: 'The user declined to install Git. Do not retry; ask how they would like to proceed.', rejected: true };
+        }
+        setActivity(c, 'Installing Git');
+        const off = api.onGitInstallProgress((p) => {
+          if (p.phase === 'download') row.setBody(`Downloading Git… ${p.percent || 0}%`);
+          else if (p.phase === 'extract') row.setBody('Unpacking Git…');
+          else if (p.phase === 'find') row.setBody('Finding the latest Git…');
+        });
+        try {
+          const res = await api.gitInstall();
+          if (res.ok) {
+            gitReady = true;
+            row.setBody('Git installed and ready.');
+            return { result: 'Git was installed successfully and is now available for git commands.', meta: 'done' };
+          }
+          row.setBody(res.output || 'Install failed.');
+          return { result: `Git install failed: ${res.output}`, failed: true };
+        } finally {
+          off();
+        }
+      }
+      case 'install_app': {
+        const id = String(args.id || '').trim();
+        const nm = String(args.name || '').trim();
+        if (!id && !nm) return { result: 'Error: provide an app id or name to install.' };
+        const target = id || nm;
+        const q = (x) => `"${String(x).replace(/"/g, '')}"`;
+        const sel = id ? `-e --id ${q(id)}` : q(nm);
+        const cmd = `winget install ${sel} --accept-package-agreements --accept-source-agreements --silent`;
+        if (needsApproval('command', cmd)) {
+          const ok = await row.requestApproval({ kind: 'command', question: `Install ${target} with winget?`, command: cmd, dangerous: false });
+          if (!ok) return { result: 'The user declined to install this app. Do not retry; ask how they would like to proceed.', rejected: true };
+        }
+        showTerminal(true, false);
+        termWrite(`\n❯ ${cmd}  (Qwen)\n`, 'term-cmd');
+        setActivity(c, `Installing ${target}`);
+        const r = await api.runCommand(cmd, 20 * 60_000);
+        termWrite(`[exit code ${r.code}]\n`, 'term-exit');
+        row.setBody(r.output || '(no output)');
+        if (/not recognized|is not recognized as|'winget' is not|cannot find the path/i.test(r.output)) {
+          return { result: "winget isn't available on this PC. Install \"App Installer\" from the Microsoft Store (or update Windows) to enable app installs. For Git specifically, use the install_git tool instead, which doesn't need winget.", failed: true };
+        }
+        if (/No package found|Multiple packages found/i.test(r.output)) {
+          return { result: `winget couldn't uniquely match "${target}".\n${truncate(r.output)}\nRetry install_app with an exact winget id (e.g. "Apple.iTunes").`, failed: true };
+        }
         return { result: `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`, meta: `exit ${r.code}`, failed: r.code !== 0 };
       }
       default:

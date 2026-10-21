@@ -62,8 +62,9 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - Code blocks get **Copy**, **Insert** and **Apply** buttons.
   - A context meter shows how full Qwen's memory is.
 - **Agent tools:**
-  - Always available: `list_files`, `read_file`, `search_code`, `edit_file`, `write_file`, `run_command`, `todo_write`, `ask_user`, plus `web_search` and `fetch_url` unless research is turned off.
-  - On demand: `load_skill` (when the project has skills), and `delete_file` / `move_file`, which Qwen loads with `tool_search` when needed.
+  - Always available: `list_files`, `read_file`, `search_code`, `edit_file`, `write_file`, `run_command`, `todo_write`, `ask_user`, `install_app`, plus `web_search` and `fetch_url` unless research is turned off.
+  - On demand: `load_skill` (when the project has skills), `install_git`, and `delete_file` / `move_file`, which Qwen loads with `tool_search` when needed.
+  - **Install apps by asking:** say "install iTunes" (or VLC, Chrome, VS Code…) and Qwen installs it with **winget**, the Windows Package Manager, after your approval. If winget isn't on the PC, it says so; for Git it falls back to `install_git`, which downloads a portable Git into the app's folder with no winget and no admin rights.
   - Independent lookups in one reply run in parallel; edits and commands run one at a time.
 - **Planner handoff (two models):**
   - Let a local Qwen do the grunt work and hand the hard parts to a stronger "planner" model (e.g. Gemini 2.5 Pro, or another Qwen in the cloud). Set it up in **Settings → Planner (heavy model) handoff**.
