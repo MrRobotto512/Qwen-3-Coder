@@ -1552,6 +1552,7 @@ function systemPrompt(c) {
       '- For tasks with 3 or more steps, keep a plan with todo_write and update it as you finish each step.',
       '- When you need several independent lookups (reads, searches, listings), request them all in the same reply; they run in parallel. Edits and commands run one at a time, in the order you give them.',
       '- Install what the task needs instead of asking the user to do it by hand: when a command fails because a program is "not found" or "not recognized" (a compiler, SDK, CLI or build tool), install the missing tool with install_app (a winget id like "OpenJS.NodeJS" or "Rustlang.Rustup", or a plain name) — or install_git for Git — then retry.',
+      '- When a command or tool call fails, deal with that failure before any other step: read the error output, research it with web_search if it is unclear, then fix it or change approach. Never move to the next planned step as if a failed one had succeeded, and never rerun a failed command unchanged. If something cannot be installed (e.g. winget has no such package), pick a different way to meet the goal rather than skipping it.',
       '- To build or run a project, follow its own documented steps (its README and package.json scripts) rather than inventing a raw build command. If a required tool needs a reboot, admin rights or manual setup (for example Docker Desktop with WSL2), install and do what you can, then tell the user exactly what is left for them. If the project already ships a prebuilt download (a release asset) that meets the request, point the user to it instead of building from source.',
       '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
       '- Paths are relative to the project root and use forward slashes.',
@@ -2448,6 +2449,7 @@ async function runConversation(c) {
   let escalateNext = false; // run the next turn on the heavy model to break an impasse
   let autoNudges = 0; // times this run we pushed back on an announce-then-stop reply
   let ranTools = false; // whether any tool has run in this task yet
+  let failStreak = 0; // consecutive rounds containing a failed call
   for (let step = 0; step < maxSteps; step++) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
@@ -2542,6 +2544,7 @@ async function runConversation(c) {
     ranTools = true;
 
     let progressed = false;
+    let roundFailed = false;
     for (const batch of toolBatches(calls)) {
       if (c.stopRequested) {
         for (const call of batch) c.history.push({ role: 'tool', tool_call_id: call.id, content: 'Cancelled by the user.' });
@@ -2554,9 +2557,23 @@ async function runConversation(c) {
         rows[i].done(outs[i]);
         c.history.push({ role: 'tool', tool_call_id: call.id, content: outs[i].result });
         if (outs[i].progress) progressed = true;
+        if (outs[i].failed && !outs[i].rejected) roundFailed = true;
       });
       if (c === state.conv) updateCtxMeter();
       saveConv(c);
+    }
+
+    // A failure the model plows past is worse than a stall: two failing rounds in a row means
+    // it is advancing the plan as if the failed steps had worked.
+    failStreak = roundFailed ? failStreak + 1 : 0;
+    if (failStreak === 2) {
+      c.history.push({ role: 'user', content: '<system-reminder>\nSteps keep failing and you are continuing the plan anyway. Stop advancing. Deal with the most recent failure first: read its error output, research it with web_search if it is unclear, then fix it or change approach. Never continue as if a failed step had succeeded, and never rerun a failed command unchanged. If you are genuinely blocked, ask the user with ask_user.\n</system-reminder>' });
+      if (heavyOverride()) {
+        escalateNext = true;
+        const item = { t: 'notice', text: `Steps keep failing — handing off to ${heavyLabel()} to deal with the error.` };
+        c.display.push(item);
+        renderNotice(c, item);
+      }
     }
 
     stall = progressed ? 0 : stall + 1;
