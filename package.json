@@ -56,12 +56,12 @@
       {
         "provider": "github",
         "owner": "MrRobotto512",
-        "repo": "Qwen-3-Coder"
+        "repo": "Qwen-Workspace"
       }
     ]
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/MrRobotto512/Qwen-3-Coder.git"
+    "url": "https://github.com/MrRobotto512/Qwen-Workspace.git"
   }
 }

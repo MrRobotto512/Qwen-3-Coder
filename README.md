@@ -4,7 +4,7 @@ A desktop coding workspace for Windows, powered by **Qwen**. It has a file explo
 
 ## Download
 
-Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Qwen-3-Coder/releases): the installer, a portable `.exe`, or a zip. The builds aren't code-signed, so Windows SmartScreen may warn you the first time. Click **More info → Run anyway**.
+Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Qwen-Workspace/releases): the installer, a portable `.exe`, or a zip. The builds aren't code-signed, so Windows SmartScreen may warn you the first time. Click **More info → Run anyway**.
 
 ## Features
 
@@ -111,8 +111,8 @@ Use **Alibaba Cloud Model Studio (DashScope)** (model `qwen3-coder-plus`) or **O
 You need [Node.js 20+](https://nodejs.org) on Windows.
 
 ```powershell
-git clone https://github.com/MrRobotto512/Qwen-3-Coder.git
-cd Qwen-3-Coder
+git clone https://github.com/MrRobotto512/Qwen-Workspace.git
+cd Qwen-Workspace
 npm install
 npm start
 ```

@@ -4,7 +4,7 @@ const { app, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
-const REPO = { owner: 'MrRobotto512', repo: 'Qwen-3-Coder' };
+const REPO = { owner: 'MrRobotto512', repo: 'Qwen-Workspace' };
 const RELEASES_URL = `https://github.com/${REPO.owner}/${REPO.repo}/releases`;
 
 let lastCheck = null;
