@@ -1,4 +1,4 @@
-/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge, MODEL_CATALOG, recommendModels, recommendLongContext, catalogEntryFor, describeSpecs, formatGB, formatContext */
+/* global monaco, marked, DOMPurify, require, api, icon, iconEl, fileBadge, MODEL_CATALOG, recommendModels, recommendLongContext, catalogEntryFor, describeSpecs, formatGB, formatContext, DANGEROUS_COMMAND, commandNeedsApproval */
 'use strict';
 
 // `api` is the bridge exposed by preload.js (window.api).
@@ -33,7 +33,6 @@ const APPROVAL_MODES = {
   auto: { label: 'Full auto', icon: 'zap', desc: 'Edits and commands run without asking. Destructive commands still ask.' }
 };
 // Commands that always need approval, whatever the mode.
-const DANGEROUS_COMMAND = /\b(rm\s+-[a-z]*[rf]|rmdir|rd\s+\/s|del\s|erase\s|format\s|mkfs|shutdown|reboot|reg\s+delete|remove-item|git\s+(push|reset\s+--hard|clean|checkout\s+--|branch\s+-D)|npm\s+publish|diskpart|bcdedit|takeown|icacls)\b/i;
 const DEFAULT_MAX_STEPS = 60;
 // After this many rounds that made no progress (only repeated or read-only calls, no file
 // change or command), nudge the model to finish instead of looping.
@@ -1430,23 +1429,11 @@ function commandPrefix(cmd) {
   return (twoWord.test(words[0]) && words[1] && !words[1].startsWith('-') ? words.slice(0, 2) : words.slice(0, 1)).join(' ');
 }
 
-function isAllowedCommand(cmd) {
-  const c = cmd.trim().toLowerCase();
-  return (state.settings.allowedCommands || []).some((p) => {
-    const pre = p.trim().toLowerCase();
-    if (!pre) return false;
-    // MCP allow-entries end in "__" and match by prefix; shell commands match whole words.
-    if (pre.endsWith('__')) return c.startsWith(pre);
-    return c === pre || c.startsWith(pre + ' ');
-  });
-}
-
 function needsApproval(kind, command) {
   const mode = approvalMode();
   if (kind === 'edit') return mode === 'ask';
-  if (DANGEROUS_COMMAND.test(command)) return true;
-  if (mode === 'auto') return false;
-  return mode === 'ask' || !isAllowedCommand(command);
+  // commandNeedsApproval, DANGEROUS_COMMAND: globals from approvals.js.
+  return commandNeedsApproval(mode, command, state.settings.allowedCommands);
 }
 
 async function allowCommandPrefix(prefix) {
