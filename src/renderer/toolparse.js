@@ -107,6 +107,17 @@ function announcesAction(text) {
   return /\b(let'?s (start|begin|proceed|now|first|ask|verify|fetch|run|install|check|create|search)|i('|’)?ll (now |first |start )?(ask|fetch|run|install|search|check|create|write|verify|begin)|next,? (i|we) (will|need to)|(i|we) (will|need to) (now |first )?(ask|fetch|run|install|search|check|create|write|verify))\b[^.]*[.!]?\s*$/i.test(tail);
 }
 
-const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction };
+// Is a reply a step-by-step instruction list for the user ("Step 1: …", numbered how-to)?
+// Used only when a task ran no tools at all: an agent asked to do something should perform the
+// steps, not hand them over. A short answer or a brief list of options is left alone.
+function looksLikeInstructions(text) {
+  const t = String(text || '');
+  if (t.length < 200) return false;
+  const numbered = (t.match(/^\s{0,3}\d+\.\s/gm) || []).length;
+  const stepHeads = (t.match(/^#{0,4}\s*(\*\*)?step\s*\d/gim) || []).length;
+  return stepHeads >= 2 || numbered >= 4;
+}
+
+const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions };
 if (typeof module !== 'undefined' && module.exports) module.exports = ToolParseExports;
 if (typeof window !== 'undefined') window.ToolParse = ToolParseExports;

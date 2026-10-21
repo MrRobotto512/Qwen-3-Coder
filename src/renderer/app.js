@@ -2447,6 +2447,7 @@ async function runConversation(c) {
   let stall = 0; // consecutive rounds with no real progress
   let escalateNext = false; // run the next turn on the heavy model to break an impasse
   let autoNudges = 0; // times this run we pushed back on an announce-then-stop reply
+  let ranTools = false; // whether any tool has run in this task yet
   for (let step = 0; step < maxSteps; step++) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
@@ -2518,17 +2519,27 @@ async function runConversation(c) {
     c.history.push(msg);
     saveConv(c);
     if (!calls.length) {
-      // Small models often announce the next action ("Let's start by…:") and end the turn
-      // without the tool call. Push back a couple of times instead of silently stopping.
-      if (useTools && autoNudges < 2 && ToolParse.announcesAction(msg.content)) {
-        autoNudges++;
-        c.history.push({ role: 'user', content: '<system-reminder>\nYour reply announced an action but contained no tool call, so nothing ran. Do it now: emit the tool call(s) for the step you described (ask_user, web_search, run_command, install_app, …). Remember that text and code blocks are never executed. Do not describe the step again.\n</system-reminder>' });
-        // If a heavy model is configured, let it take this recovery turn.
-        if (heavyOverride()) escalateNext = true;
-        continue;
+      // Small models often end a turn without acting: announcing the next step ("Let's start
+      // by…:"), or answering a build request with a how-to list and no tool use at all. Push
+      // back a couple of times instead of silently stopping.
+      if (useTools && autoNudges < 2) {
+        let nudge = null;
+        if (ToolParse.announcesAction(msg.content)) {
+          nudge = 'Your reply announced an action but contained no tool call, so nothing ran. Do it now: emit the tool call(s) for the step you described (ask_user, web_search, run_command, install_app, …). Remember that text and code blocks are never executed. Do not describe the step again.';
+        } else if (!ranTools && ToolParse.looksLikeInstructions(msg.content)) {
+          nudge = 'You gave the user a list of steps instead of performing them. You are an agent with tools: unless the user asked only for an explanation, carry the steps out yourself now — research with web_search, install with install_app, create files with write_file, run commands with run_command, ask with ask_user. Start with step 1 now, as a tool call.';
+        }
+        if (nudge) {
+          autoNudges++;
+          c.history.push({ role: 'user', content: `<system-reminder>\n${nudge}\n</system-reminder>` });
+          // If a heavy model is configured, let it take this recovery turn.
+          if (heavyOverride()) escalateNext = true;
+          continue;
+        }
       }
       return false;
     }
+    ranTools = true;
 
     let progressed = false;
     for (const batch of toolBatches(calls)) {
