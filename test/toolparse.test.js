@@ -49,3 +49,22 @@ test('MCP tool names are recognized', () => {
   const text = '{"name": "mcp__rea__analyze_binary", "arguments": {"path": "x"}}';
   assert.equal(extractTextToolCalls(text, NAMES).calls[0].function.name, 'mcp__rea__analyze_binary');
 });
+
+test('announcesAction: announce-then-stop replies are caught', () => {
+  const { announcesAction } = require('../src/renderer/toolparse.js');
+  // Trailing colon before an action that never came (the screenshot cases).
+  assert.equal(announcesAction("Let's begin by asking the user which DVD ripping tool they prefer:"), true);
+  assert.equal(announcesAction("Let's start by verifying Docker and installing Visual Studio Build Tools:"), true);
+  // Announce phrasing without a colon.
+  assert.equal(announcesAction("I'll now fetch the PCSX2 documentation."), true);
+  assert.equal(announcesAction('Next, we will install the DVD ripping tool.'), true);
+  assert.equal(announcesAction("Sure, let's ask the user which tool they prefer"), true);
+});
+
+test('announcesAction: real final answers are left alone', () => {
+  const { announcesAction } = require('../src/renderer/toolparse.js');
+  assert.equal(announcesAction('Done. I created rip-ps2.ps1 and added a QWEN.md note about the toolchain.'), false);
+  assert.equal(announcesAction('The build failed because dlltool.exe is missing; install MinGW-w64 and retry.'), false);
+  assert.equal(announcesAction('All tests pass and the feature is complete.'), false);
+  assert.equal(announcesAction(''), false);
+});

@@ -1379,7 +1379,7 @@ const TOOL_SEARCH_TOOL = {
   type: 'function',
   function: {
     name: 'tool_search',
-    description: 'Load tools listed in <deferred_tools> so you can call them. Search by name or purpose.',
+    description: 'Load tools listed in <deferred_tools> so you can call them. Search by name or purpose. This searches the app\'s own tool catalog only — to find software, documentation or facts, use web_search instead.',
     parameters: { type: 'object', properties: { query: { type: 'string', description: 'What you need to do, or a tool name.' } }, required: ['query'] }
   }
 };
@@ -1864,7 +1864,7 @@ async function executeTool(c, call, row) {
         const words = String(args.query || '').toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 2);
         const catalog = deferredCatalog();
         const matches = catalog.filter((t) => !words.length || words.some((w) => `${t.function.name} ${t.function.description}`.toLowerCase().includes(w))).slice(0, 12);
-        if (!matches.length) return { result: `No matching tools. Deferred tools: ${catalog.map((t) => t.function.name).join(', ')}.`, meta: 'none found' };
+        if (!matches.length) return { result: `No matching tools. tool_search only searches this app's own tool catalog (deferred tools: ${catalog.map((t) => t.function.name).join(', ')}). If you were looking for software, a program to install, documentation or facts, use web_search for research or install_app to install a Windows app — then continue the task.`, meta: 'none found' };
         c.activeTools = [...new Set([...(c.activeTools || []), ...matches.map((t) => t.function.name)])];
         const out = matches.map((t) => `${t.function.name}: ${t.function.description}\nParameters: ${JSON.stringify(t.function.parameters.properties)}`).join('\n\n');
         row.setBody(out);
@@ -2446,6 +2446,7 @@ async function runConversation(c) {
   const seen = new Map(); // call signature -> first step it ran
   let stall = 0; // consecutive rounds with no real progress
   let escalateNext = false; // run the next turn on the heavy model to break an impasse
+  let autoNudges = 0; // times this run we pushed back on an announce-then-stop reply
   for (let step = 0; step < maxSteps; step++) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
@@ -2516,7 +2517,18 @@ async function runConversation(c) {
     if (calls.length) msg.tool_calls = calls;
     c.history.push(msg);
     saveConv(c);
-    if (!calls.length) return false;
+    if (!calls.length) {
+      // Small models often announce the next action ("Let's start by…:") and end the turn
+      // without the tool call. Push back a couple of times instead of silently stopping.
+      if (useTools && autoNudges < 2 && ToolParse.announcesAction(msg.content)) {
+        autoNudges++;
+        c.history.push({ role: 'user', content: '<system-reminder>\nYour reply announced an action but contained no tool call, so nothing ran. Do it now: emit the tool call(s) for the step you described (ask_user, web_search, run_command, install_app, …). Remember that text and code blocks are never executed. Do not describe the step again.\n</system-reminder>' });
+        // If a heavy model is configured, let it take this recovery turn.
+        if (heavyOverride()) escalateNext = true;
+        continue;
+      }
+      return false;
+    }
 
     let progressed = false;
     for (const batch of toolBatches(calls)) {

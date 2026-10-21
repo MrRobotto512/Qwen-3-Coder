@@ -97,6 +97,16 @@ function extractTextToolCalls(content, names) {
   return calls.length ? { calls, cleaned: content.slice(0, start).trim() } : { calls, cleaned: content.trim() };
 }
 
-const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls };
+// Does a reply end by announcing an action it never took ("Let's start by…:", "I'll now ask…")?
+// Kept narrow on purpose: a real final answer summarizes what was done, it doesn't announce the
+// very next step. Used to push back on announce-then-stop replies instead of ending the task.
+function announcesAction(text) {
+  const tail = String(text || '').trim().slice(-220);
+  if (!tail) return false;
+  if (/[:：]\s*$/.test(tail)) return true;
+  return /\b(let'?s (start|begin|proceed|now|first|ask|verify|fetch|run|install|check|create|search)|i('|’)?ll (now |first |start )?(ask|fetch|run|install|search|check|create|write|verify|begin)|next,? (i|we) (will|need to)|(i|we) (will|need to) (now |first )?(ask|fetch|run|install|search|check|create|write|verify))\b[^.]*[.!]?\s*$/i.test(tail);
+}
+
+const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction };
 if (typeof module !== 'undefined' && module.exports) module.exports = ToolParseExports;
 if (typeof window !== 'undefined') window.ToolParse = ToolParseExports;
