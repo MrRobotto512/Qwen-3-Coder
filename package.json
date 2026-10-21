@@ -1,6 +1,6 @@
 {
   "name": "qwen-workspace",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Desktop coding workspace powered by Qwen (Ollama, LM Studio, or any OpenAI-compatible API)",
   "main": "src/main.js",
   "scripts": {
