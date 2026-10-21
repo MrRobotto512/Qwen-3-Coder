@@ -543,3 +543,6 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .mcp-add { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 4px; }
 .mcp-add input { width: 100%; }
 .mcp-add button { justify-self: start; }
+
+.msg.error .stop-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.msg.error .stop-actions button { font-size: 12px; padding: 3px 10px; }

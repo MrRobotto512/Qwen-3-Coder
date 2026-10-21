@@ -207,6 +207,10 @@
           <option value="auto">Full auto — nothing asks except destructive commands</option>
         </select>
       </label>
+      <label>Steps per task before stopping
+        <input id="s-maxSteps" type="number" min="10" max="200" step="10" />
+        <span class="hint">How many tool rounds Qwen may take on one request. If it stalls, it is nudged to finish; it stops at this limit so a loop can't run forever.</span>
+      </label>
       <label>Always-allowed commands
         <input id="s-allowedCommands" placeholder="e.g. npm test, cmake, git status" spellcheck="false" />
         <span class="hint">Commands starting with these run without asking in Auto-edit mode. Separate with commas.</span>

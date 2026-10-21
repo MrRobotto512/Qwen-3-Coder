@@ -34,7 +34,10 @@ const APPROVAL_MODES = {
 };
 // Commands that always need approval, whatever the mode.
 const DANGEROUS_COMMAND = /\b(rm\s+-[a-z]*[rf]|rmdir|rd\s+\/s|del\s|erase\s|format\s|mkfs|shutdown|reboot|reg\s+delete|remove-item|git\s+(push|reset\s+--hard|clean|checkout\s+--|branch\s+-D)|npm\s+publish|diskpart|bcdedit|takeown|icacls)\b/i;
-const MAX_AGENT_STEPS = 40;
+const DEFAULT_MAX_STEPS = 60;
+// After this many rounds that made no progress (only repeated or read-only calls, no file
+// change or command), nudge the model to finish instead of looping.
+const STALL_LIMIT = 6;
 const MAX_TOOL_RESULT = 24_000;
 const MAX_ATTACH = 60_000;
 
@@ -1199,6 +1202,22 @@ const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'search_code', 'load
 const WEB_PAGE_CHARS = 12_000;
 const READ_PAGE = 400;
 
+// A stable signature for a tool call, used to spot the model repeating the exact same call.
+function callSignature(call) {
+  let args = call.function.arguments || '';
+  try {
+    args = JSON.stringify(sortedKeys(JSON.parse(args)));
+  } catch {
+    /* use raw */
+  }
+  return `${call.function.name}(${args})`;
+}
+function sortedKeys(v) {
+  if (Array.isArray(v)) return v.map(sortedKeys);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortedKeys(v[k])]));
+  return v;
+}
+
 function toolBatches(calls) {
   const batches = [];
   for (const call of calls) {
@@ -2187,7 +2206,10 @@ async function send() {
 // Runs model turns and tool calls until Qwen stops calling tools. Returns true on failure.
 async function runConversation(c) {
   const useTools = state.settings.agentMode && !!state.ws;
-  for (let step = 0; step < MAX_AGENT_STEPS; step++) {
+  const maxSteps = Math.max(10, parseInt(state.settings.maxSteps, 10) || DEFAULT_MAX_STEPS);
+  const seen = new Map(); // call signature -> first step it ran
+  let stall = 0; // consecutive rounds with no real progress
+  for (let step = 0; step < maxSteps; step++) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
     if (c.stopRequested) return false;
@@ -2256,6 +2278,7 @@ async function runConversation(c) {
     saveConv(c);
     if (!calls.length) return false;
 
+    let progressed = false;
     for (const batch of toolBatches(calls)) {
       if (c.stopRequested) {
         for (const call of batch) c.history.push({ role: 'tool', tool_call_id: call.id, content: 'Cancelled by the user.' });
@@ -2263,18 +2286,56 @@ async function runConversation(c) {
       }
       const rows = batch.map((call) => view.addStep(call));
       setActivity(c, rows.length > 1 ? `Running ${rows.length} lookups` : `${rows[0].doing} ${rows[0].target}`);
-      const outs = await Promise.all(batch.map((call, i) => executeTool(c, call, rows[i])));
-      // Results go back in the order Qwen asked for them, whatever order they finished in.
+      const outs = await Promise.all(batch.map((call, i) => runOrSkip(c, call, rows[i], seen, step)));
       batch.forEach((call, i) => {
         rows[i].done(outs[i]);
         c.history.push({ role: 'tool', tool_call_id: call.id, content: outs[i].result });
+        if (outs[i].progress) progressed = true;
       });
       if (c === state.conv) updateCtxMeter();
       saveConv(c);
     }
-    if (step === MAX_AGENT_STEPS - 1) addError(c, `Stopped after ${MAX_AGENT_STEPS} steps. Send a message to let Qwen continue.`);
+
+    stall = progressed ? 0 : stall + 1;
+    // Nudge the model back on track before it burns through the whole budget.
+    if (stall === STALL_LIMIT) {
+      c.history.push({ role: 'user', content: '<system-reminder>\nYou have repeated steps without making progress. Stop exploring. Either make the next concrete change for the current plan item, or, if you are blocked or the task is done, reply to the user in plain text (no tool call) — ask a question with ask_user if you need a decision.\n</system-reminder>' });
+    }
+    if (step === maxSteps - 2) {
+      c.history.push({ role: 'user', content: '<system-reminder>\nThis is your last step. Finish now: summarize what you did and what remains for the user, in plain text with no tool call.\n</system-reminder>' });
+    }
   }
+  addStopNotice(c);
   return false;
+}
+
+// Runs a tool, unless it is an identical repeat of an earlier read-only call this run — then it
+// returns the earlier outcome with a note, so the model stops looping instead of re-reading.
+async function runOrSkip(c, call, row, seen, step) {
+  const sig = callSignature(call);
+  const name = call.function.name;
+  if (READ_ONLY_TOOLS.has(name) && seen.has(sig)) {
+    row.setBody('(skipped — identical to an earlier step)');
+    return { result: `You already ran this exact call at step ${seen.get(sig) + 1}; the result has not changed. Do not repeat it. Move on to the next step, or finish and reply to the user.`, meta: 'repeat', failed: true, progress: false };
+  }
+  seen.set(sig, step);
+  const out = await executeTool(c, call, row);
+  // "Progress" = a change or command or a first-time read; pure repeats and errors don't count.
+  out.progress = !out.failed && !out.rejected;
+  return out;
+}
+
+function addStopNotice(c) {
+  const node = el('div', { class: 'msg error' }, iconEl('alert'),
+    el('div', {},
+      el('div', { text: `Qwen stopped after ${Math.max(10, parseInt(state.settings.maxSteps, 10) || DEFAULT_MAX_STEPS)} steps without finishing. It may be stuck in a loop.` }),
+      el('div', { class: 'stop-actions' },
+        el('button', { class: 'primary', onclick: () => { if (!c.busy) { setPrompt('Continue.', true); } } }, 'Continue'),
+        el('button', { class: 'ghost', onclick: () => { $('#prompt').focus(); } }, 'Give direction'),
+        el('button', { class: 'ghost', onclick: () => openSettings() }, 'Raise the step limit'))));
+  c.display.push({ t: 'error', text: `Qwen stopped after ${Math.max(10, parseInt(state.settings.maxSteps, 10) || DEFAULT_MAX_STEPS)} steps without finishing. It may be stuck in a loop. Send a message to continue.` });
+  c.container.append(node);
+  scrollChat(c, true);
 }
 
 function stopChat(c = state.conv) {
@@ -3257,6 +3318,7 @@ function openSettings() {
   renderMcpSettings();
   $('#s-approvalMode').value = approvalMode();
   $('#s-allowedCommands').value = (s.allowedCommands || []).join(', ');
+  $('#s-maxSteps').value = s.maxSteps || DEFAULT_MAX_STEPS;
   $('#s-test-result').textContent = '';
   $('#settings-modal').classList.remove('hidden');
 }
@@ -3270,6 +3332,7 @@ async function saveSettingsFromUi() {
   patch.fontSize = parseInt($('#s-fontSize').value, 10) || 14;
   patch.contextLength = Math.max(2048, parseInt($('#s-contextLength').value, 10) || 32768);
   patch.allowedCommands = $('#s-allowedCommands').value.split(',').map((x) => x.trim()).filter(Boolean);
+  patch.maxSteps = Math.min(200, Math.max(10, parseInt($('#s-maxSteps').value, 10) || DEFAULT_MAX_STEPS));
   for (const k of ['agentMode', 'includeCurrentFile', 'followAgent', 'autoCheckUpdates']) patch[k] = $(`#s-${k}`).checked;
   state.settings = await api.setSettings(patch);
   $('#settings-modal').classList.add('hidden');

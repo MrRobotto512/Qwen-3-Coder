@@ -32,6 +32,7 @@ const DEFAULT_SETTINGS = {
   contextLength: 32768,
   recentWorkspaces: [],
   autoCheckUpdates: true,
+  maxSteps: 60, // how many tool rounds the agent may take before stopping
   webResearch: true, // lets the agent use web_search and fetch_url
   searchProvider: 'duckduckgo', // duckduckgo | brave | searxng
   searchApiKey: '',

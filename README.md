@@ -79,6 +79,7 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
 - **Plan and compaction:**
   - For multi-step tasks, Qwen keeps a plan (shown above the message box).
   - When a conversation nears the context window, older turns are summarized automatically. Click the context meter to summarize now.
+- **Loop protection:** if Qwen repeats the exact same lookup, the app skips it and tells Qwen to move on. If it keeps stalling, Qwen is nudged to finish or ask a question. A task stops after a set number of steps (Settings → Agent, default 60) so a loop can't run forever; the stop message has a one-click **Continue**.
 
 ## 1. Get a Qwen model running
 
