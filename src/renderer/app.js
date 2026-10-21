@@ -24,6 +24,7 @@ const PROVIDERS = {
   ollama: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b' },
   lmstudio: { baseUrl: 'http://localhost:1234/v1', model: 'qwen2.5-coder-7b-instruct' },
   dashscope: { baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', model: 'qwen3-coder-plus' },
+  gemini: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-flash' },
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', model: 'qwen/qwen3-coder' },
   custom: { baseUrl: '', model: '' }
 };

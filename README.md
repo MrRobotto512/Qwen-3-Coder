@@ -104,7 +104,12 @@ Download a Qwen2.5-Coder or Qwen3-Coder model, then start the local server from 
 
 ### Option C: Cloud API
 
-Use **Alibaba Cloud Model Studio (DashScope)** (model `qwen3-coder-plus`) or **OpenRouter** (`qwen/qwen3-coder`). Paste your API key in Settings.
+Use a cloud model when you want more capability than your PC can run locally. Pick the provider in **Settings → Provider**, paste your API key, click **Fetch models** and choose one:
+- **Google Gemini** — a strong coder with a very large context window. Get a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey); good default `gemini-2.5-flash` (fast/cheap) or `gemini-2.5-pro` (stronger).
+- **Alibaba Cloud Model Studio (DashScope)** — `qwen3-coder-plus`.
+- **OpenRouter** — `qwen/qwen3-coder` and many others.
+
+Cloud models send your code and prompts to that provider and use its quota/billing, unlike local Ollama which stays on your machine. Set **Max response tokens** in Settings to bound cost.
 
 ## 2. Run the app
 
