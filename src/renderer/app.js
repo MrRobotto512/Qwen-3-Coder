@@ -2596,6 +2596,25 @@ async function runConversation(c) {
   let failStreak = 0; // consecutive rounds containing a failed call
   let interventions = 0; // how often the app has had to push back this task
   let heavyTakeover = false; // after repeated pushbacks, the heavy model drives the rest
+  const retriedBusy = new Set(); // models that already got one same-model retry after a 503/429
+  const modelSwap = new Map(); // overloaded model -> working sibling, for the rest of this task
+  let cloudDead = false; // every cloud sibling was busy; finish on the local default model
+
+  const note = (text) => {
+    const item = { t: 'notice', text };
+    c.display.push(item);
+    renderNotice(c, item);
+  };
+
+  // Drop the empty assistant bubble a failed request leaves behind, so retries stay clean.
+  const dropEmptyTurn = () => {
+    const last = c.display[c.display.length - 1];
+    if (last && last.t === 'assistant' && !last.content && !(last.steps || []).length) {
+      c.display.pop();
+      const node = c.container.lastElementChild;
+      if (node?.classList.contains('assistant')) node.remove();
+    }
+  };
 
   // Record an intervention. With a heavy model configured, it takes the next turn — and after
   // the second intervention it takes over the whole task, since the light model keeps fumbling.
@@ -2620,8 +2639,14 @@ async function runConversation(c) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
     if (c.stopRequested) return false;
-    const esc = heavyTakeover || escalateNext ? heavyOverride() : null;
-    const override = esc || conversationOverride(c);
+    const esc = !cloudDead && (heavyTakeover || escalateNext) ? heavyOverride() : null;
+    let override = esc || (cloudDead ? null : conversationOverride(c));
+    // A model that went "busy" earlier in this task stays swapped for its working sibling.
+    if (override && modelSwap.has(override.model)) override = { ...override, model: modelSwap.get(override.model) };
+    else if (!override && modelSwap.has(state.settings.model)) {
+      const sNow = state.settings;
+      override = { provider: sNow.provider, baseUrl: sNow.baseUrl, apiKey: sNow.apiKey, model: modelSwap.get(sNow.model) };
+    }
     escalateNext = false;
     const view = addAssistantMessage(c, null, override ? override.model : null);
     const id = `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
@@ -2664,6 +2689,31 @@ async function runConversation(c) {
     }
 
     if (!res.ok) {
+      // "Busy" errors (503/429/overloaded) get a retry, then a sibling model, then — for a
+      // cloud helper — a fallback to the local model, instead of killing the task.
+      if (ToolParse.isBusyModelError(res.error)) {
+        const failedModel = override?.model || state.settings.model;
+        dropEmptyTurn();
+        if (esc && !heavyTakeover) escalateNext = true; // keep a one-shot escalation alive
+        if (!retriedBusy.has(failedModel)) {
+          retriedBusy.add(failedModel);
+          note(`${failedModel} is overloaded — retrying in 8 seconds.`);
+          await new Promise((r) => setTimeout(r, 8000));
+          continue;
+        }
+        const next = ToolParse.modelAlternates(failedModel).find((m) => !retriedBusy.has(m));
+        if (next) {
+          modelSwap.set(failedModel, next);
+          for (const [orig, cur] of modelSwap) if (cur === failedModel) modelSwap.set(orig, next);
+          note(`${failedModel} is still overloaded — switching to ${next} for the rest of this task.`);
+          continue;
+        }
+        if (override) {
+          cloudDead = true;
+          note(`Every ${/^gemini/i.test(failedModel) ? 'Gemini' : 'cloud'} model is busy right now — continuing on ${state.settings.model}.`);
+          continue;
+        }
+      }
       view.finish(false);
       addError(c, res.error, useTools);
       return true;

@@ -33,6 +33,12 @@ const server = http.createServer((req, res) => {
   req.on('data', (d) => (body += d));
   req.on('end', () => {
     requests++;
+    // The very first request is answered with a 503, so the loop's busy-model retry must kick
+    // in for the task to complete at all.
+    if (requests === 1) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      return res.end('{"error":{"code":503,"status":"UNAVAILABLE","message":"high demand"}}');
+    }
     const hasToolResult = body.includes('"role":"tool"');
     if (!hasToolResult) {
       sse(res, [
@@ -86,7 +92,7 @@ try {
   else if (!fs.readFileSync(madeFile, 'utf8').includes('made by the agent loop')) fail('smoke-made.txt has the wrong content');
 
   await win.waitForFunction(() => [...document.querySelectorAll('.msg.assistant .md')].some((e) => e.textContent.includes('Done. I created smoke-made.txt.')), null, { timeout: 15_000 }).catch(() => fail('the final assistant turn never rendered'));
-  if (requests < 2) fail(`expected 2 model requests, saw ${requests}`);
+  if (requests < 3) fail(`expected 3 model requests (503, tool turn, final), saw ${requests}`);
 } catch (e) {
   fail(String(e).split('\n')[0]);
 } finally {
@@ -96,4 +102,4 @@ try {
   fs.rmSync(ws, { recursive: true, force: true });
 }
 if (process.exitCode) process.exit(process.exitCode);
-console.log(`agent smoke ok: ${requests} model turns, tool executed, file written, final answer rendered`);
+console.log(`agent smoke ok: ${requests} model requests (incl. one 503 retried), tool executed, file written, final answer rendered`);

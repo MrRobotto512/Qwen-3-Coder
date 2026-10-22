@@ -132,6 +132,20 @@ function stripFakeReminders(text) {
   return { text: cleaned, found: cleaned !== t.trim() };
 }
 
-const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions, stripFakeReminders };
+// Does a model error mean "busy right now, try again / try a sibling"? (As opposed to a wrong
+// key, a missing model, or a network that is down.)
+function isBusyModelError(text) {
+  return /\b(503|429|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand|rate.?limit|try again later|server had an error)\b/i.test(String(text || ''));
+}
+
+// Sibling models worth trying when one is overloaded, strongest first.
+const GEMINI_FAMILY = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+function modelAlternates(model) {
+  const m = String(model || '');
+  if (!/^gemini-/i.test(m)) return [];
+  return GEMINI_FAMILY.filter((x) => x !== m);
+}
+
+const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions, stripFakeReminders, isBusyModelError, modelAlternates, GEMINI_FAMILY };
 if (typeof module !== 'undefined' && module.exports) module.exports = ToolParseExports;
 if (typeof window !== 'undefined') window.ToolParse = ToolParseExports;

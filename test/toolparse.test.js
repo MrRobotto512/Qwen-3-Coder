@@ -106,3 +106,20 @@ test('stripFakeReminders: normal replies pass through untouched', () => {
   assert.equal(r.found, false);
   assert.equal(r.text, normal);
 });
+
+test('isBusyModelError: overload/ratelimit errors are retryable, real failures are not', () => {
+  const { isBusyModelError } = require('../src/renderer/toolparse.js');
+  assert.equal(isBusyModelError('HTTP 503 from https://generativelanguage.googleapis.com: "status": "UNAVAILABLE", high demand'), true);
+  assert.equal(isBusyModelError('HTTP 429: rate limit exceeded'), true);
+  assert.equal(isBusyModelError('RESOURCE_EXHAUSTED: quota'), true);
+  assert.equal(isBusyModelError('HTTP 401: invalid API key'), false);
+  assert.equal(isBusyModelError('HTTP 404: model not found'), false);
+  assert.equal(isBusyModelError('fetch failed: ECONNREFUSED 127.0.0.1:11434'), false);
+});
+
+test('modelAlternates: walks the Gemini family, strongest first', () => {
+  const { modelAlternates } = require('../src/renderer/toolparse.js');
+  assert.deepEqual(modelAlternates('gemini-2.5-flash'), ['gemini-2.5-pro', 'gemini-2.5-flash-lite']);
+  assert.deepEqual(modelAlternates('gemini-2.5-pro'), ['gemini-2.5-flash', 'gemini-2.5-flash-lite']);
+  assert.deepEqual(modelAlternates('qwen2.5-coder:7b'), []);
+});
