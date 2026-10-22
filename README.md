@@ -83,6 +83,8 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
 - **Project memory and skills:**
   - Put standing instructions for Qwen in `QWEN.md` (or `AGENTS.md`) at the project root.
   - Put task-specific instructions in `.qwen/skills/<name>/SKILL.md`. Personal skills that apply to every project go in `%APPDATA%\qwen-workspace\skills\`.
+  - **Claude-format skills work as-is:** the project's `.claude/skills` and your personal `~/.claude/skills` are picked up too, so skills made for Claude Code run here unchanged.
+  - **Install from GitHub:** in **Settings → Skills**, paste a link to a repo or to a folder containing `SKILL.md` (e.g. `…/tree/main/skills/my-skill`) and click Install.
   - Qwen sees only each skill's name and description, and loads the rest when a task calls for it.
 - **Plan and compaction:**
   - For multi-step tasks, Qwen keeps a plan (shown above the message box).

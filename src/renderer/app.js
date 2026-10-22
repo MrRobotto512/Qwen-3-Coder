@@ -3607,6 +3607,42 @@ function showApprovalMenu(anchor) {
   showMenu(r.left, r.top, items, { above: true });
 }
 
+const SKILL_SCOPE_TEXT = { project: 'project', claude: 'project · .claude', user: 'personal', claudeuser: 'personal · ~/.claude' };
+
+async function renderSkillsSettings() {
+  const list = $('#skills-list');
+  if (!list) return;
+  const skills = await api.skillsList().catch(() => []);
+  if (!skills.length) {
+    list.replaceChildren(el('div', { class: 'empty-note', text: 'No skills yet. Install one above, or create .qwen/skills/<name>/SKILL.md in your project.' }));
+    return;
+  }
+  list.replaceChildren(...skills.map((sk) => el('div', { class: 'skill-row', title: sk.description },
+    iconEl('book'),
+    el('span', { class: 'sk-name', text: sk.name }),
+    el('span', { class: 'sk-scope', text: SKILL_SCOPE_TEXT[sk.scope] || sk.scope }),
+    el('span', { class: 'sk-desc', text: sk.description }))));
+}
+
+async function installSkillFromUrl() {
+  const inp = $('#skill-url');
+  const out = $('#skill-install-result');
+  const url = inp.value.trim();
+  if (!url) return;
+  out.className = 'hint';
+  out.textContent = 'Installing…';
+  const r = await api.skillsInstall(url).catch((e) => ({ ok: false, output: cleanError(e) }));
+  if (r.ok) {
+    out.className = 'hint ok';
+    out.textContent = `Installed "${r.name}" (${r.files} file${r.files === 1 ? '' : 's'}, ${r.scope === 'project' ? 'this project' : 'personal'}). New conversations can use it.`;
+    inp.value = '';
+    renderSkillsSettings();
+  } else {
+    out.className = 'hint bad';
+    out.textContent = r.output || 'Install failed.';
+  }
+}
+
 function showAttachMenu(anchor) {
   const r = anchor.getBoundingClientRect();
   showMenu(r.left, r.top, [
@@ -3704,6 +3740,8 @@ function openSettings() {
   $('#about-kind').textContent = KIND_TEXT[state.appInfo?.kind] || '';
   renderUpdateUi();
   renderMcpSettings();
+  renderSkillsSettings();
+  $('#skill-install-result').textContent = '';
   $('#s-approvalMode').value = approvalMode();
   $('#s-allowedCommands').value = (s.allowedCommands || []).join(', ');
   $('#s-maxSteps').value = s.maxSteps || DEFAULT_MAX_STEPS;
@@ -4485,6 +4523,7 @@ function bindUi() {
   $('#s-fetch-models').onclick = fetchModels;
   $('#s-searchProvider').onchange = renderSearchFields;
   $('#mcp-add-btn').onclick = addServerFromForm;
+  $('#skill-install-btn').onclick = installSkillFromUrl;
   $('#sb-mcp').onclick = openSettings;
   $('#s-save').onclick = saveSettingsFromUi;
   $('#s-cancel').onclick = () => $('#settings-modal').classList.add('hidden');

@@ -247,6 +247,15 @@
         <label>Planner model <input id="s-heavy-model" spellcheck="false" placeholder="e.g. gemini-2.5-pro" /></label>
       </div>
 
+      <div class="section-title">Skills</div>
+      <div class="hint">Task instructions Qwen loads on demand. Project skills live in <code>.qwen/skills</code>; Claude-format skills in the project's <code>.claude/skills</code> and your personal <code>~/.claude/skills</code> are picked up too. Install one from GitHub by linking to a repo or to a folder that contains <code>SKILL.md</code>.</div>
+      <div class="mcp-add">
+        <input id="skill-url" placeholder="https://github.com/owner/repo/tree/main/skills/my-skill" spellcheck="false" />
+        <button id="skill-install-btn">Install skill</button>
+      </div>
+      <div id="skill-install-result" class="hint"></div>
+      <div id="skills-list"></div>
+
       <div class="section-title">Tools &amp; MCP servers</div>
       <div class="hint">MCP servers add tools Qwen can use (e.g. reverse engineering, databases, browsers). Qwen loads a server's tools only when a task needs them, and each call needs your approval. Node-based servers need Node.js installed.</div>
       <div id="mcp-list"></div>

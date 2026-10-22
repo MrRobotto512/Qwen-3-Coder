@@ -834,8 +834,14 @@ ipcMain.handle('hf:resolve', async (_e, repo) => {
 // data folder. Only names and descriptions go into the prompt; the rest loads on demand.
 function skillRoots() {
   const roots = [];
-  if (workspaceRoot) roots.push(['project', path.join(workspaceRoot, '.qwen', 'skills')]);
+  if (workspaceRoot) {
+    roots.push(['project', path.join(workspaceRoot, '.qwen', 'skills')]);
+    // Claude-format skills use the same SKILL.md layout, so a project set up for Claude Code
+    // (or your personal ~/.claude skills) works here unchanged.
+    roots.push(['claude', path.join(workspaceRoot, '.claude', 'skills')]);
+  }
   roots.push(['user', path.join(app.getPath('userData'), 'skills')]);
+  roots.push(['claudeuser', path.join(app.getPath('home'), '.claude', 'skills')]);
   return roots;
 }
 
@@ -888,6 +894,56 @@ ipcMain.handle('skills:read', async (_e, id, file) => {
   if (st.size > 200 * 1024) throw new Error('Skill file is too large');
   const text = await fsp.readFile(target, 'utf8');
   return { content: file ? text : parseSkill(text, dirName).body, files: await listSkillFiles(base) };
+});
+
+// Installs a skill folder from a GitHub link (a repo, or a folder inside one via /tree/…) into
+// the project's .qwen/skills — or the personal skills folder when no project is open. Files are
+// fetched one by one through the GitHub contents API, so no git or tar is needed.
+ipcMain.handle('skills:install', async (_e, url) => {
+  const m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/(?:tree|blob)\/([^/]+)(?:\/(.*))?)?\/?$/.exec(String(url || '').trim());
+  if (!m) return { ok: false, output: 'Use a GitHub link: https://github.com/owner/repo or …/tree/<branch>/<folder containing SKILL.md>.' };
+  const [, owner, repo, ref, subRaw] = m;
+  const sub = (subRaw || '').replace(/\/+$/, '');
+  const gh = (p) => fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${p}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Qwen-Workspace' },
+    signal: AbortSignal.timeout(30_000)
+  });
+
+  const files = []; // { rel, url }
+  async function walk(p, rel, depth) {
+    if (depth > 3 || files.length >= 40) return;
+    const res = await gh(p);
+    if (!res.ok) throw new Error(`GitHub answered HTTP ${res.status} for ${p || 'the repository root'}${res.status === 404 ? ' — check the link (and the branch name)' : ''}.`);
+    const list = await res.json();
+    if (!Array.isArray(list)) throw new Error('That link points to a file. Link to the folder that contains SKILL.md.');
+    for (const e of list) {
+      if (files.length >= 40) break;
+      // Only plain names: no traversal, no hidden/exotic entries.
+      if (e.name === '..' || !/^[\w][\w.\- ]*$/.test(e.name)) continue;
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (e.type === 'dir') await walk(e.path, childRel, depth + 1);
+      else if (e.type === 'file' && e.size <= 300 * 1024 && e.download_url) files.push({ rel: childRel, url: e.download_url });
+    }
+  }
+  try {
+    await walk(sub, '', 0);
+    if (!files.some((f) => f.rel === 'SKILL.md')) return { ok: false, output: 'That folder has no SKILL.md, so it is not a skill. Link to the folder that contains SKILL.md (e.g. …/tree/main/skills/<name>).' };
+    const dirName = (sub.split('/').pop() || repo).replace(/[^\w.-]/g, '-');
+    const root = workspaceRoot ? path.join(workspaceRoot, '.qwen', 'skills') : path.join(app.getPath('userData'), 'skills');
+    const dest = path.join(root, dirName);
+    if (fs.existsSync(dest)) return { ok: false, output: `A skill folder named "${dirName}" already exists (${dest}). Remove it first to reinstall.` };
+    for (const f of files) {
+      const res = await fetch(f.url, { headers: { 'User-Agent': 'Qwen-Workspace' }, signal: AbortSignal.timeout(60_000) });
+      if (!res.ok) throw new Error(`Downloading ${f.rel} failed (HTTP ${res.status}).`);
+      const target = path.join(dest, ...f.rel.split('/'));
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      await fsp.writeFile(target, Buffer.from(await res.arrayBuffer()));
+    }
+    const meta = parseSkill(await fsp.readFile(path.join(dest, 'SKILL.md'), 'utf8'), dirName);
+    return { ok: true, name: meta.name, description: meta.description, dest, files: files.length, scope: workspaceRoot ? 'project' : 'user' };
+  } catch (err) {
+    return { ok: false, output: err.message };
+  }
 });
 
 // Supporting files in a skill folder (relative, forward slashes), not counting SKILL.md.

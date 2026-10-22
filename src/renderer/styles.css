@@ -558,3 +558,8 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .commit-card .btns { display: flex; justify-content: flex-end; gap: 6px; }
 
 #conv-model-label { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.skill-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 12.5px; border-bottom: 1px solid var(--border); min-width: 0; }
+.skill-row .sk-name { font-weight: 600; white-space: nowrap; }
+.skill-row .sk-scope { color: var(--text-2); font-size: 11px; background: var(--bg-3); border-radius: 4px; padding: 0 6px; white-space: nowrap; }
+.skill-row .sk-desc { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }

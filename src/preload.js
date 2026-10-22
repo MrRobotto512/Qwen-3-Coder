@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld('api', {
 
   skillsList: () => ipcRenderer.invoke('skills:list'),
   skillsRead: (id, file) => ipcRenderer.invoke('skills:read', id, file),
+  skillsInstall: (url) => ipcRenderer.invoke('skills:install', url),
 
   gitCommit: (message) => ipcRenderer.invoke('git:commit', message),
   gitInit: () => ipcRenderer.invoke('git:init'),
