@@ -1308,8 +1308,15 @@ const CORE_TOOLS = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run a shell command in the project root and return its output (non-interactive, 2 minute timeout). Use it to build, test, install packages or run scripts, instead of for reading or searching files.',
-      parameters: { type: 'object', properties: { command: { type: 'string', description: 'The command line to run.' } }, required: ['command'] }
+      description: 'Run a shell command in the project root and return its output (non-interactive). Use it to build, test, install packages or run scripts, instead of for reading or searching files. The default timeout is 2 minutes — for anything long (compiling a project, cloning a big repo, an installer) pass timeout_seconds, up to 3600. A command killed by the timeout says so at the end of its output; rerun it with a larger timeout_seconds instead of assuming it failed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The command line to run.' },
+          timeout_seconds: { type: 'number', description: 'How long to let it run, 10–3600 (default 120). Use 1800+ for full builds.' }
+        },
+        required: ['command']
+      }
     }
   },
   {
@@ -1630,6 +1637,7 @@ function systemPrompt(c) {
       '- For tasks with 3 or more steps, keep a plan with todo_write and update it as you finish each step.',
       '- When you need several independent lookups (reads, searches, listings), request them all in the same reply; they run in parallel. Edits and commands run one at a time, in the order you give them.',
       '- Install what the task needs instead of asking the user to do it by hand: when a command fails because a program is "not found" or "not recognized" (a compiler, SDK, CLI or build tool), install the missing tool with install_app (a winget id like "OpenJS.NodeJS" or "Rustlang.Rustup", or a plain name) — or install_git for Git — then retry.',
+      '- A build or install that takes long is normal: pass timeout_seconds (up to 3600) to run_command instead of splitting the build or giving up when the 2-minute default cuts it off.',
       '- When a command or tool call fails, deal with that failure before any other step: read the error output, research it with web_search if it is unclear, then fix it or change approach. Never move to the next planned step as if a failed one had succeeded, and never rerun a failed command unchanged. If something cannot be installed (e.g. winget has no such package), pick a different way to meet the goal rather than skipping it.',
       '- To build or run a project, follow its own documented steps (its README and package.json scripts) rather than inventing a raw build command. If a required tool needs a reboot, admin rights or manual setup (for example Docker Desktop with WSL2), install and do what you can, then tell the user exactly what is left for them. If the project already ships a prebuilt download (a release asset) that meets the request, point the user to it instead of building from source.',
       '- Read a file before editing it. Use edit_file for targeted changes instead of rewriting whole files with write_file.',
@@ -2009,10 +2017,11 @@ async function executeTool(c, call, row) {
           const ok = await row.requestApproval({ kind: 'command', question: 'Run this command?', command: cmd, dangerous: DANGEROUS_COMMAND.test(cmd) });
           if (!ok) return { result: 'The user declined to run this command. Do not retry it; ask the user how they would like to proceed.', rejected: true };
         }
+        const timeoutMs = Math.min(3600, Math.max(10, Number(args.timeout_seconds) || 120)) * 1000;
         showTerminal(true, false);
         termWrite(`\n❯ ${cmd}  (Qwen)\n`, 'term-cmd');
         setActivity(c, `Running ${cmd}`);
-        const r = await api.runCommand(cmd);
+        const r = await api.runCommand(cmd, timeoutMs);
         termWrite(`[exit code ${r.code}]\n`, 'term-exit');
         row.setBody(r.output || '(no output)');
         state.fileIndex = null;
