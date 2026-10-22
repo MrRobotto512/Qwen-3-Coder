@@ -122,6 +122,16 @@ function looksLikeInstructions(text) {
   return false;
 }
 
-const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions };
+// Remove <system-reminder> blocks a model wrote into its own reply. Only the app issues those;
+// a forged one ("I can't interact with the file system, I'll simulate…") poisons every later
+// turn, so it must never reach the history or the screen. Returns the cleaned text and whether
+// anything was removed; an unclosed block at the end of the reply is removed too.
+function stripFakeReminders(text) {
+  const t = String(text || '');
+  const cleaned = t.replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, '').trim();
+  return { text: cleaned, found: cleaned !== t.trim() };
+}
+
+const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions, stripFakeReminders };
 if (typeof module !== 'undefined' && module.exports) module.exports = ToolParseExports;
 if (typeof window !== 'undefined') window.ToolParse = ToolParseExports;

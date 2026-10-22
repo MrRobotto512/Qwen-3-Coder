@@ -1558,6 +1558,7 @@ function systemPrompt(c) {
       '- Paths are relative to the project root and use forward slashes.',
       '- Tool results come from the tools you call, not from the user. Keep working until the task is done instead of stopping to describe what you will do next.',
       '- To run a command or use a tool, actually CALL the tool — do not write the command, the tool name or its arguments in a Markdown code block or in prose. Text and code blocks are only shown to the user; they never run. For example, to install software call the install_app tool with an id argument; do not type `install_app "…"` as if it were a shell command. To run a shell command, call run_command with the command. If your reply contains a command you want executed, you made a mistake: issue it as a tool call instead.',
+      '- Your tools are real. list_files, read_file, write_file, run_command and the rest execute on the user\'s PC and their results are real. Never say you cannot access the file system or run commands, never "simulate" a result or invent tool output, and never write a <system-reminder> block yourself — those come only from the app.',
       '- A message may end with a <system-reminder> from the app (not the user) describing the editor and task state. Use it as context; never reply to it directly.',
       '- If the user rejects an edit or command, do not retry it; ask what they want instead.',
       '- Make focused, minimal changes that match the existing code style.',
@@ -2529,6 +2530,13 @@ async function runConversation(c) {
     }
 
     let content = res.content || '';
+    // A model sometimes forges a <system-reminder> of its own ("I can't access the file
+    // system, I'll simulate…"); strip it before it can poison the history or the screen.
+    const forged = ToolParse.stripFakeReminders(content);
+    if (forged.found) {
+      content = forged.text;
+      view.setContent(content);
+    }
     let calls = res.toolCalls || [];
     if (useTools && !calls.length && textToolCallStart(content) >= 0) {
       const parsed = extractTextToolCalls(content);
@@ -2548,7 +2556,9 @@ async function runConversation(c) {
       // back a couple of times instead of silently stopping.
       if (useTools && autoNudges < 2) {
         let nudge = null;
-        if (textToolCallStart(msg.content) >= 0) {
+        if (forged.found) {
+          nudge = 'You wrote a <system-reminder> block yourself; only the app issues those, and it has been removed. Your tools are real: list_files, read_file, run_command and the rest actually execute on this PC and returned real results earlier. Never claim you cannot access the file system, and never simulate output. Continue the task now with a real tool call.';
+        } else if (textToolCallStart(msg.content) >= 0) {
           // A tool-call marker is present but nothing could be parsed out of it.
           nudge = 'Your reply contained a tool call that could not be parsed, so nothing ran. Re-send it as one valid call: either use the native tool-calling format, or exactly <tool_call>{"name": "<tool>", "arguments": { … }}</tool_call> with correct JSON. Do not mix prose into the call.';
         } else if (ToolParse.announcesAction(msg.content)) {
