@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const vm = require('node:vm');
 const updater = require('./updater');
 const { detectSpecs } = require('./hardware');
@@ -1190,20 +1190,46 @@ function gitDir() {
   return exe === 'git' ? null : path.dirname(exe);
 }
 
-// process.env with the resolved git's folders prepended to PATH, so shell commands (`git ...`
-// run via cmd:run) find a portable or non-PATH git the same way runGit does.
+// On Windows a fresh install writes its folder to the registry Path, but a running app keeps
+// the environment it started with — so "install cmake" followed by "cmake" fails with "not
+// recognized" until a restart. Read the machine and user Path from the registry (cached
+// briefly) so newly installed tools work in the very next command.
+let regPathCache = { at: 0, value: '' };
+function registryPath() {
+  if (process.platform !== 'win32') return '';
+  if (Date.now() - regPathCache.at < 20_000) return regPathCache.value;
+  const read = (hive) => {
+    try {
+      const out = execFileSync('reg', ['query', hive, '/v', 'Path'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+      const m = /REG_(?:EXPAND_)?SZ\s+([^\r\n]+)/.exec(out);
+      return m ? m[1].trim() : '';
+    } catch {
+      return '';
+    }
+  };
+  let combined = [read('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'), read('HKCU\\Environment')].filter(Boolean).join(';');
+  // Expand %SystemRoot%-style references against the live environment.
+  combined = combined.replace(/%([^%;]+)%/g, (_m, name) => process.env[name] ?? process.env[name.toUpperCase()] ?? `%${name}%`);
+  regPathCache = { at: Date.now(), value: combined };
+  return combined;
+}
+
+// process.env with the resolved git's folders prepended and the registry Path appended, so
+// shell commands find a portable/non-PATH git and freshly installed tools alike. The variable
+// is usually stored as "Path" on Windows; reuse the existing key to avoid a duplicate.
 function commandEnv() {
-  const dir = gitDir();
-  if (!dir) return process.env;
-  const root = path.dirname(dir); // the Git install root (parent of cmd/)
-  const extra = [dir, path.join(root, 'bin'), path.join(root, 'mingw64', 'bin'), path.join(root, 'usr', 'bin')].filter(safeExists);
-  if (!extra.length) return process.env;
-  const sep = process.platform === 'win32' ? ';' : ':';
-  // On Windows the variable is usually stored as "Path"; writing a second "PATH" key would
-  // leave a duplicate and the prepended folders might be ignored. Reuse the existing key.
   const env = { ...process.env };
   const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
-  env[key] = extra.join(sep) + sep + (env[key] || '');
+  const parts = [env[key] || ''];
+  const dir = gitDir();
+  if (dir) {
+    const root = path.dirname(dir); // the Git install root (parent of cmd/)
+    const extra = [dir, path.join(root, 'bin'), path.join(root, 'mingw64', 'bin'), path.join(root, 'usr', 'bin')].filter(safeExists);
+    if (extra.length) parts.unshift(extra.join(path.delimiter));
+  }
+  const reg = registryPath();
+  if (reg) parts.push(reg);
+  env[key] = parts.filter(Boolean).join(path.delimiter);
   return env;
 }
 

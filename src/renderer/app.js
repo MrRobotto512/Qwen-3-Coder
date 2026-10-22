@@ -2128,7 +2128,10 @@ async function executeTool(c, call, row) {
         if (/No package found|Multiple packages found/i.test(r.output)) {
           return { result: `winget couldn't uniquely match "${target}".\n${truncate(r.output)}\nRetry install_app with an exact winget id (e.g. "Apple.iTunes").`, failed: true };
         }
-        return { result: `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`, meta: `exit ${r.code}`, failed: r.code !== 0 };
+        if (r.code === 0) {
+          return { result: `Exit code: 0\n${truncate(r.output || '(no output)')}\nThe install succeeded. PATH is refreshed automatically, so the installed command works in your next run_command. If it still is not found, use its full install path instead of reinstalling.`, meta: 'installed' };
+        }
+        return { result: `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`, meta: `exit ${r.code}`, failed: true };
       }
       default:
         return { result: `Error: unknown tool "${name}". Available tools: ${toolsFor(c).map((t) => t.function.name).join(', ')}.` };
@@ -2695,7 +2698,7 @@ async function runConversation(c) {
       // Small models often end a turn without acting: announcing the next step ("Let's start
       // by…:"), or answering a build request with a how-to list and no tool use at all. Push
       // back a couple of times instead of silently stopping.
-      if (useTools && autoNudges < 2) {
+      if (useTools && autoNudges < 5) {
         let nudge = null;
         if (forged.found) {
           nudge = 'You wrote a <system-reminder> block yourself; only the app issues those, and it has been removed. Your tools are real: list_files, read_file, run_command and the rest actually execute on this PC and returned real results earlier. Never claim you cannot access the file system, and never simulate output. Continue the task now with a real tool call.';
@@ -3942,7 +3945,7 @@ async function saveSettingsFromUi() {
   patch.maxResponseTokens = Math.max(0, parseInt($('#s-maxResponseTokens').value, 10) || 0);
   patch.keepAlive = ($('#s-keepAlive').value.trim() || '-1');
   patch.allowedCommands = $('#s-allowedCommands').value.split(',').map((x) => x.trim()).filter(Boolean);
-  patch.maxSteps = Math.min(200, Math.max(10, parseInt($('#s-maxSteps').value, 10) || DEFAULT_MAX_STEPS));
+  patch.maxSteps = Math.min(1000, Math.max(10, parseInt($('#s-maxSteps').value, 10) || DEFAULT_MAX_STEPS));
   for (const k of ['agentMode', 'includeCurrentFile', 'followAgent', 'autoCheckUpdates']) patch[k] = $(`#s-${k}`).checked;
   patch.heavy = {
     enabled: $('#s-heavy-enabled').checked,
