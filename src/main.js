@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const { spawn } = require('child_process');
+const vm = require('node:vm');
 const updater = require('./updater');
 const { detectSpecs } = require('./hardware');
 const web = require('./web');
@@ -963,6 +964,103 @@ async function listSkillFiles(base, rel = '', out = [], depth = 0) {
   }
   return out;
 }
+
+// ---------- tool programs (codemode) ----------
+// Runs a model-written mini-program in a hardened VM: no require/process/network in scope, no
+// dynamic code generation inside the sandbox (codeGeneration: strings:false), null-prototype
+// host bridges only, and string-only values across the boundary (promises and errors the
+// program sees are created in its own realm). Every tools.* call is executed by the renderer
+// through the normal tool pipeline — including approvals — and answered via program:answer.
+const programCalls = new Map(); // callId -> { resolve, reject } (sandbox-realm functions)
+
+ipcMain.handle('program:answer', (_e, callId, result, failed) => {
+  const pending = programCalls.get(callId);
+  programCalls.delete(callId);
+  if (pending) (failed ? pending.reject : pending.resolve)(String(result ?? ''));
+  return true;
+});
+
+ipcMain.handle('program:run', async (event, runId, code, toolNames, timeoutMs) => {
+  const limitMs = Math.min(Math.max(Number(timeoutMs) || 180_000, 10_000), 600_000);
+  const logs = [];
+  let calls = 0;
+  let dead = false;
+  const sandbox = Object.create(null);
+  const ctx = vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });
+  // Factories compiled inside the sandbox realm, so the program only ever sees its own realm's
+  // promises and functions; host intrinsics never cross the boundary.
+  const makeWrap = vm.runInContext('(hostCall) => (args) => new Promise((resolve, reject) => { hostCall(JSON.stringify(args ?? {}), resolve, reject); })', ctx);
+  const tools = vm.runInContext('Object.create(null)', ctx);
+  for (const name of (toolNames || []).slice(0, 64)) {
+    const hostCall = (argsJson, resolve, reject) => {
+      if (dead) return reject('The program has ended.');
+      if (++calls > 50) {
+        dead = true;
+        return reject('Too many tool calls (max 50 per program).');
+      }
+      const callId = `${runId}:${calls}`;
+      programCalls.set(callId, { resolve, reject });
+      let args = {};
+      try {
+        args = JSON.parse(argsJson);
+      } catch {
+        /* empty args */
+      }
+      if (event.sender.isDestroyed()) reject('The window is gone.');
+      else event.sender.send('program:call', { callId, name, args });
+    };
+    Object.setPrototypeOf(hostCall, null);
+    tools[name] = makeWrap(hostCall);
+  }
+  const hostLog = (line) => {
+    if (logs.length < 200) logs.push(String(line).slice(0, 2000));
+  };
+  Object.setPrototypeOf(hostLog, null);
+  const hostSleep = (argsJson, resolve) => {
+    let ms = 0;
+    try {
+      ms = Number(JSON.parse(argsJson).ms) || 0;
+    } catch {
+      /* 0 */
+    }
+    setTimeout(() => resolve(''), Math.min(Math.max(ms, 0), 30_000));
+  };
+  Object.setPrototypeOf(hostSleep, null);
+  const setup = vm.runInContext(`(tools, log, sleepTool) => {
+    globalThis.tools = tools;
+    const c = Object.create(null);
+    c.log = (...a) => log(a.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(' '));
+    c.error = c.warn = c.info = c.log;
+    globalThis.console = c;
+    globalThis.sleep = (ms) => sleepTool({ ms });
+  }`, ctx);
+  setup(tools, hostLog, makeWrap(hostSleep));
+
+  try {
+    const script = new vm.Script(`(async () => {\n${String(code)}\n})()`, { filename: 'tool-program.js' });
+    const value = await Promise.race([
+      Promise.resolve(script.runInContext(ctx, { timeout: 30_000 })),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`The program ran longer than ${Math.round(limitMs / 1000)}s and was stopped.`)), limitMs))
+    ]);
+    let str = '';
+    try {
+      str = value === undefined || value === null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+    } catch {
+      str = String(value);
+    }
+    return { ok: true, logs, calls, value: String(str).slice(0, 8000) };
+  } catch (err) {
+    return { ok: false, logs, calls, error: String((err && err.message) || err).slice(0, 2000) };
+  } finally {
+    dead = true;
+    for (const [id, pending] of programCalls) {
+      if (id.startsWith(`${runId}:`)) {
+        pending.reject('The program has ended.');
+        programCalls.delete(id);
+      }
+    }
+  }
+});
 
 // ---------- web research ----------
 ipcMain.handle('web:search', (_e, query) => web.webSearch(loadSettings(), String(query || '').slice(0, 400)));

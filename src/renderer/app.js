@@ -1350,6 +1350,7 @@ const DEFERRED_TOOLS = [
       }
     }
   },
+  PROGRAM_TOOL,
   {
     type: 'function',
     function: {
@@ -1486,6 +1487,17 @@ async function showConvModelMenu(anchor) {
   showMenu(r.left, r.top, items, { above: true });
 }
 
+const PROGRAM_TOOL = {
+  type: 'function',
+  function: {
+    name: 'run_program',
+    description: 'Run a short JavaScript program that batches many tool calls in one turn — sequence, branch, loop, Promise.all. The code is the body of an async function. Call tools as `await tools.read_file({ path: "src/a.js" })`; each returns the tool\'s result as a string, and a failed call rejects with the error text (try/catch to handle it). `console.log(...)` reports progress, `sleep(ms)` waits, and `return` a final summary. There is no network, file system, require or import — only the provided tools, which still follow the user\'s approval rules. Max 50 tool calls. Use it for mechanical multi-step work (collect TODOs from many files, apply the same change across files); work step by step yourself when each step needs judgment.',
+    parameters: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript statements forming an async function body.' } }, required: ['code'] }
+  }
+};
+// Meta tools stay outside programs: they steer the conversation, not the project.
+const PROGRAM_EXCLUDED = new Set(['run_program', 'consult_planner', 'tool_search', 'load_skill', 'ask_user', 'todo_write']);
+
 const CONSULT_TOOL = {
   type: 'function',
   function: {
@@ -1502,6 +1514,7 @@ function toolsFor(c) {
   const tools = [...core, ...deferred.filter((t) => active.has(t.function.name))];
   if (c.skills?.length) tools.push(LOAD_SKILL_TOOL);
   if (heavyOverride()) tools.push(CONSULT_TOOL);
+  if ((heavyOverride() || conversationOverride(c)) && !tools.some((t) => t.function.name === 'run_program')) tools.push(PROGRAM_TOOL);
   if (deferred.some((t) => !active.has(t.function.name))) tools.push(TOOL_SEARCH_TOOL);
   return tools;
 }
@@ -1546,6 +1559,7 @@ const TOOL_INFO = {
   edit_file: { icon: 'pencil', verb: 'Edit', doing: 'Editing' },
   run_command: { icon: 'terminal', verb: 'Run', doing: 'Running' },
   install_app: { icon: 'download', verb: 'Install', doing: 'Installing' },
+  run_program: { icon: 'zap', verb: 'Program', doing: 'Running a program with' },
   install_git: { icon: 'download', verb: 'Install', doing: 'Installing Git' },
   todo_write: { icon: 'list', verb: 'Plan', doing: 'Updating the plan' },
   ask_user: { icon: 'chat', verb: 'Question', doing: 'Waiting for your answer to' },
@@ -1712,6 +1726,10 @@ function describeCall(name, args) {
       return { target: `${args.name || ''}${args.file ? ` · ${args.file}` : ''}` };
     case 'install_app':
       return { target: args.id || args.name || 'app' };
+    case 'run_program': {
+      const lines = String(args.code || '').split('\n').length;
+      return { target: `${lines} line${lines === 1 ? '' : 's'}`, title: String(args.code || '').slice(0, 400) };
+    }
     case 'install_git':
       return { target: 'Git' };
     case 'consult_planner':
@@ -2000,6 +2018,53 @@ async function executeTool(c, call, row) {
         state.fileIndex = null;
         renderTree();
         return { result: `Exit code: ${r.code}\n${truncate(r.output || '(no output)')}`, meta: `exit ${r.code}`, failed: r.code !== 0 };
+      }
+      case 'run_program': {
+        const code = String(args.code || '').trim();
+        if (!code) return { result: 'Error: empty program.' };
+        if (needsApproval('command', 'run_program')) {
+          const ok = await row.requestApproval({ kind: 'command', question: 'Run this tool program?', command: code.slice(0, 4000), dangerous: false });
+          if (!ok) return { result: 'The user declined to run this program. Do not retry it; ask how they would like to proceed.', rejected: true };
+        }
+        const names = toolsFor(c).map((t) => t.function.name).filter((n) => !PROGRAM_EXCLUDED.has(n));
+        const runId = `p${Date.now().toString(36)}`;
+        const log = [];
+        const paint = () => row.setBody(log.slice(-40).join('\n') || '(running…)');
+        // Inner calls run one at a time even when the program issues them in parallel, so
+        // approval cards and the step row stay coherent.
+        let queue = Promise.resolve();
+        const off = api.onProgramCall(({ callId, name: toolName, args: a }) => {
+          if (!String(callId).startsWith(runId + ':')) return;
+          queue = queue.then(async () => {
+            let out;
+            if (!names.includes(toolName)) {
+              out = { result: `Error: tool "${toolName}" is not available inside programs. Available: ${names.join(', ')}.`, failed: true };
+            } else {
+              setActivity(c, `Program: ${toolName}`);
+              out = await executeTool(c, { id: callId, type: 'function', function: { name: toolName, arguments: JSON.stringify(a || {}) } }, row);
+            }
+            const d = describeCall(toolName, a || {});
+            log.push(`▸ ${toolName}${d.target ? ` · ${d.target}` : ''} — ${out.rejected ? 'rejected' : out.failed ? 'failed' : out.meta || 'ok'}`);
+            paint();
+            api.programAnswer(callId, out.result, !!(out.failed || out.rejected));
+          }).catch(() => {});
+        });
+        setActivity(c, 'Running program');
+        paint();
+        try {
+          const r = await api.programRun(runId, code, names, 180_000);
+          if (r.logs?.length) log.push(...r.logs.map((l) => `· ${l}`));
+          log.push(r.ok ? `✓ done — ${r.calls || 0} tool call${r.calls === 1 ? '' : 's'}${r.value ? ` · returned ${String(r.value).slice(0, 120)}` : ''}` : `✗ ${r.error}`);
+          paint();
+          const result = [
+            r.ok ? `Program finished (${r.calls || 0} tool calls).` : `Program failed after ${r.calls || 0} tool calls: ${r.error}`,
+            r.logs?.length ? `console output:\n${truncate(r.logs.join('\n'))}` : '',
+            r.value ? `Returned: ${truncate(r.value)}` : ''
+          ].filter(Boolean).join('\n');
+          return { result, meta: `${r.calls || 0} calls`, failed: !r.ok };
+        } finally {
+          off();
+        }
       }
       case 'install_git': {
         try {

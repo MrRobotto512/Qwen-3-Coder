@@ -68,6 +68,14 @@ contextBridge.exposeInMainWorld('api', {
   skillsRead: (id, file) => ipcRenderer.invoke('skills:read', id, file),
   skillsInstall: (url) => ipcRenderer.invoke('skills:install', url),
 
+  programRun: (runId, code, names, timeoutMs) => ipcRenderer.invoke('program:run', runId, code, names, timeoutMs),
+  programAnswer: (callId, result, failed) => ipcRenderer.invoke('program:answer', callId, result, failed),
+  onProgramCall: (cb) => {
+    const fn = (_e, p) => cb(p);
+    ipcRenderer.on('program:call', fn);
+    return () => ipcRenderer.removeListener('program:call', fn);
+  },
+
   gitCommit: (message) => ipcRenderer.invoke('git:commit', message),
   gitInit: () => ipcRenderer.invoke('git:init'),
   gitClone: (url) => ipcRenderer.invoke('git:clone', url),
