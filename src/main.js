@@ -175,6 +175,7 @@ app.whenReady().then(() => {
   createWindow();
   mcp.setOnChange(() => mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.send('mcp:changed', mcp.describe()));
   mcp.connectAll(loadSettings().mcpServers).catch(() => {});
+  gitAvailable().then((ok) => ok && ensureGitLongPaths()).catch(() => {});
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -1233,6 +1234,16 @@ function commandEnv() {
   return env;
 }
 
+// Windows caps paths at 260 characters unless git opts out, and deep repos (submodules,
+// generated code) blow past that with errors that read like permission problems. Turn long
+// paths on once per session when git is available; harmless where already set.
+let longPathsSet = false;
+async function ensureGitLongPaths() {
+  if (longPathsSet || process.platform !== 'win32') return;
+  longPathsSet = true;
+  await runGit(['config', '--global', 'core.longpaths', 'true'], undefined, 10_000).catch(() => {});
+}
+
 // Is a working git reachable right now (portable, installed, or on PATH)?
 function gitAvailable() {
   return new Promise((resolve) => {
@@ -1290,6 +1301,7 @@ async function installPortableGit(onProgress) {
   const exe = portableGitExe();
   if (!safeExists(exe)) throw new Error('Git was downloaded but could not be unpacked.');
   gitPathCache = exe;
+  ensureGitLongPaths();
   onProgress?.({ phase: 'done' });
   return exe;
 }
@@ -1346,7 +1358,11 @@ ipcMain.handle('git:init', async () => {
 });
 
 // Reports whether a working git is reachable, so the UI can offer to install one if not.
-ipcMain.handle('git:ensure', async () => ({ ok: await gitAvailable(), canInstall: process.platform === 'win32' }));
+ipcMain.handle('git:ensure', async () => {
+  const ok = await gitAvailable();
+  if (ok) ensureGitLongPaths();
+  return { ok, canInstall: process.platform === 'win32' };
+});
 
 // Downloads and unpacks a portable Git, streaming progress to the renderer.
 ipcMain.handle('git:install', async (event) => {
