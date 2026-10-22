@@ -37,6 +37,7 @@ const DEFAULT_SETTINGS = {
   maxResponseTokens: 4096, // cap on reply length for cloud providers (max_tokens); 0 = no cap
   keepAlive: '-1', // how long Ollama keeps the model loaded: -1 = forever, '5m', '0' = unload now
   heavy: { enabled: false, provider: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKey: '', model: 'gemini-2.5-flash' },
+  automations: [], // recurring agent tasks: { id, name, prompt, workspace, schedule, enabled, lastRun, lastStatus }
   webResearch: true, // lets the agent use web_search and fetch_url
   searchProvider: 'duckduckgo', // duckduckgo | brave | searxng
   searchApiKey: '',

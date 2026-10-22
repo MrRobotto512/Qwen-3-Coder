@@ -247,6 +247,26 @@
         <label>Planner model <input id="s-heavy-model" spellcheck="false" placeholder="e.g. gemini-2.5-pro" /></label>
       </div>
 
+      <div class="section-title">Automations</div>
+      <div class="hint">Recurring agent tasks. Each runs in the project folder it was created for, while the app is open with that folder; daily ones catch up on launch. Runs show in History with a ⏱ title. Needs Agent mode.</div>
+      <div id="auto-list"></div>
+      <div class="mcp-add">
+        <input id="auto-name" placeholder="Name (e.g. Morning test run)" spellcheck="false" />
+        <textarea id="auto-prompt" rows="2" placeholder="What should Qwen do on each run? (e.g. Run the tests; fix simple failures; summarize.)"></textarea>
+        <div class="row two">
+          <label>Schedule
+            <select id="auto-kind">
+              <option value="interval">Every N hours</option>
+              <option value="daily">Daily at a time</option>
+            </select>
+          </label>
+          <label id="auto-hours-row">Every (hours) <input id="auto-hours" type="number" min="1" max="168" value="24" /></label>
+          <label id="auto-time-row" class="hidden">Time <input id="auto-time" type="time" value="09:00" /></label>
+        </div>
+        <label class="check" id="auto-catchup-row" hidden><input type="checkbox" id="auto-catchup" checked /> Catch up on launch when the time was missed</label>
+        <button id="auto-add-btn">Add automation</button>
+      </div>
+
       <div class="section-title">Skills</div>
       <div class="hint">Task instructions Qwen loads on demand. Project skills live in <code>.qwen/skills</code>; Claude-format skills in the project's <code>.claude/skills</code> and your personal <code>~/.claude/skills</code> are picked up too. Install one from GitHub by linking to a repo or to a folder that contains <code>SKILL.md</code>.</div>
       <div class="mcp-add">
@@ -338,6 +358,7 @@
   <script src="icons.js"></script>
   <script src="models.js"></script>
   <script src="approvals.js"></script>
+  <script src="schedule.js"></script>
   <script src="toolparse.js"></script>
   <script src="app.js"></script>
 </body>
