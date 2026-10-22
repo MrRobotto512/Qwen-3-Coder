@@ -66,6 +66,7 @@ Grab the latest build from the [Releases page](https://github.com/MrRobotto512/Q
   - On demand: `load_skill` (when the project has skills), `install_git`, and `delete_file` / `move_file`, which Qwen loads with `tool_search` when needed.
   - **Install apps by asking:** say "install iTunes" (or VLC, Chrome, VS Code…) and Qwen installs it with **winget**, the Windows Package Manager, after your approval. If winget isn't on the PC, it says so; for Git it falls back to `install_git`, which downloads a portable Git into the app's folder with no winget and no admin rights.
   - Independent lookups in one reply run in parallel; edits and commands run one at a time.
+- **Per-conversation model switch:** a model chip in the message box flips just that conversation between your default local Qwen, the planner model (e.g. Gemini), or any installed Ollama model — no trip to Settings. Messages driven by a non-default model carry a badge.
 - **Planner handoff (two models):**
   - Let a local Qwen do the grunt work and hand the hard parts to a stronger "planner" model (e.g. Gemini 2.5 Pro, or another Qwen in the cloud). Set it up in **Settings → Planner (heavy model) handoff**.
   - When Qwen stalls — repeating steps without progress — the next step runs on the planner automatically to break the impasse, then control returns to Qwen.

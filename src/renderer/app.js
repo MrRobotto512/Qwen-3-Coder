@@ -1422,6 +1422,69 @@ function heavyLabel() {
   return state.settings.heavy?.model || 'heavy model';
 }
 
+// The model the user picked for this conversation, resolved to a per-request override at send
+// time — stored as a reference ('heavy', or an installed Ollama model), never as credentials.
+function conversationOverride(c) {
+  const ch = c?.modelChoice;
+  if (!ch || ch === 'default') return null;
+  if (ch === 'heavy') return heavyOverride();
+  if (ch.provider === 'ollama' && ch.model) {
+    const base = state.settings.provider === 'ollama' ? state.settings.baseUrl : PROVIDERS.ollama.baseUrl;
+    return { provider: 'ollama', baseUrl: base, apiKey: '', model: ch.model };
+  }
+  return null;
+}
+
+function convModelLabel(c) {
+  const o = conversationOverride(c);
+  return o ? o.model : state.settings.model || 'no model';
+}
+
+function renderConvModel() {
+  const label = $('#conv-model-label');
+  if (label) label.textContent = convModelLabel(state.conv);
+}
+
+function setConvModel(c, choice) {
+  c.modelChoice = choice === 'default' ? null : choice;
+  saveConv(c);
+  renderConvModel();
+  flash(`This conversation runs on ${convModelLabel(c)}`);
+}
+
+async function showConvModelMenu(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const c = state.conv;
+  if (!c) return;
+  const ch = c.modelChoice || 'default';
+  const items = [{
+    label: state.settings.model || '(no model set)',
+    desc: `Default · ${state.settings.provider}`,
+    icon: 'cpu',
+    checked: ch === 'default',
+    onClick: () => setConvModel(c, 'default')
+  }];
+  const h = state.settings.heavy;
+  if (h?.enabled && h.model) {
+    items.push({ label: h.model, desc: `Planner · ${h.provider}`, icon: 'sparkles', checked: ch === 'heavy', onClick: () => setConvModel(c, 'heavy') });
+  }
+  // Installed Ollama models, when the server answers quickly; skip ones already listed.
+  try {
+    const tags = await Promise.race([api.ollamaTags(), new Promise((res) => setTimeout(() => res(null), 800))]);
+    if (tags?.running) {
+      const shown = new Set([state.settings.model, h?.model]);
+      for (const m of (tags.models || []).slice(0, 8)) {
+        if (shown.has(m.name)) continue;
+        items.push({ label: m.name, desc: 'Ollama (local)', icon: 'server', checked: ch?.model === m.name, onClick: () => setConvModel(c, { provider: 'ollama', model: m.name }) });
+      }
+    }
+  } catch {
+    /* Ollama not reachable; menu still works */
+  }
+  items.push({ label: 'Model settings…', icon: 'settings', onClick: openSettings });
+  showMenu(r.left, r.top, items, { above: true });
+}
+
 const CONSULT_TOOL = {
   type: 'function',
   function: {
@@ -2111,7 +2174,8 @@ function serializeConv(c) {
     usageAt: c.usageAt,
     todos: c.todos,
     compactions: c.compactions,
-    activeTools: c.activeTools
+    activeTools: c.activeTools,
+    modelChoice: c.modelChoice || null
   };
 }
 
@@ -2198,6 +2262,7 @@ function switchConv(c) {
   $('#chat-title').textContent = c.title;
   $('#chat-title').title = c.title;
   renderRunControls();
+  renderConvModel();
   updateCtxMeter();
   renderTodoBar();
   renderChanges();
@@ -2477,12 +2542,13 @@ async function runConversation(c) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
     if (c.stopRequested) return false;
-    const override = heavyTakeover || escalateNext ? heavyOverride() : null;
+    const esc = heavyTakeover || escalateNext ? heavyOverride() : null;
+    const override = esc || conversationOverride(c);
     escalateNext = false;
     const view = addAssistantMessage(c, null, override ? override.model : null);
     const id = `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
     c.chatId = id;
-    setActivity(c, override ? `Handing off to ${override.model}` : step === 0 ? 'Thinking' : 'Working');
+    setActivity(c, esc ? `Handing off to ${esc.model}` : step === 0 ? 'Thinking' : 'Working');
 
     const off = api.onChatEvent((ev) => {
       if (ev.id !== id) return;
@@ -3481,6 +3547,7 @@ function closeQuick() {
 function applySettingsToUi() {
   const s = state.settings;
   $('#model-name').textContent = s.model || 'no model';
+  renderConvModel();
   editor?.updateOptions({ fontSize: Number(s.fontSize) || 14 });
   reviewEditor?.updateOptions({ fontSize: Number(s.fontSize) || 14 });
   $$('#mode-seg button').forEach((b) => b.classList.toggle('on', (b.dataset.mode === 'agent') === !!s.agentMode));
@@ -4389,6 +4456,7 @@ function bindUi() {
   $('#history-search').oninput = renderHistory;
   $('#btn-attach').onclick = (e) => showAttachMenu(e.currentTarget);
   $('#btn-approval').onclick = (e) => showApprovalMenu(e.currentTarget);
+  $('#btn-conv-model').onclick = (e) => showConvModelMenu(e.currentTarget);
   $$('#mode-seg button').forEach((b) => {
     b.onclick = async () => {
       state.settings = await api.setSettings({ agentMode: b.dataset.mode === 'agent' });

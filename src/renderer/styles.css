@@ -556,3 +556,5 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; m
 .commit-head .i { width: 14px; height: 14px; }
 .commit-msg { width: 100%; min-height: 90px; resize: vertical; font: 12px/1.5 var(--mono); }
 .commit-card .btns { display: flex; justify-content: flex-end; gap: 6px; }
+
+#conv-model-label { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
