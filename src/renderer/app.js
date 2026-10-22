@@ -2526,7 +2526,10 @@ async function runConversation(c) {
       // back a couple of times instead of silently stopping.
       if (useTools && autoNudges < 2) {
         let nudge = null;
-        if (ToolParse.announcesAction(msg.content)) {
+        if (textToolCallStart(msg.content) >= 0) {
+          // A tool-call marker is present but nothing could be parsed out of it.
+          nudge = 'Your reply contained a tool call that could not be parsed, so nothing ran. Re-send it as one valid call: either use the native tool-calling format, or exactly <tool_call>{"name": "<tool>", "arguments": { … }}</tool_call> with correct JSON. Do not mix prose into the call.';
+        } else if (ToolParse.announcesAction(msg.content)) {
           nudge = 'Your reply announced an action but contained no tool call, so nothing ran. Do it now: emit the tool call(s) for the step you described (ask_user, web_search, run_command, install_app, …). Remember that text and code blocks are never executed. Do not describe the step again.';
         } else if (!ranTools && ToolParse.looksLikeInstructions(msg.content)) {
           nudge = 'You gave the user a list of steps instead of performing them. You are an agent with tools: unless the user asked only for an explanation, carry the steps out yourself now — research with web_search, install with install_app, create files with write_file, run commands with run_command, ask with ask_user. Start with step 1 now, as a tool call.';
