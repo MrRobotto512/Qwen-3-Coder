@@ -48,17 +48,24 @@ jobs:
 
       # The release tag is the version the app reports and updates to. Any tag containing
       # X.Y.Z works: 0.3.0, v0.3.0, v.0.3.0, release-0.3.0.
-      - name: Use the release tag as the app version
+      - name: Check the release tag against package.json
         if: env.RELEASE_TAG != ''
         shell: bash
+        # The tag must point at the commit that carries the same version in package.json —
+        # otherwise the release was tagged one commit behind and would ship the wrong code
+        # under the new number.
         run: |
           VERSION=$(echo "$RELEASE_TAG" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+          PKG=$(node -p "require('./package.json').version")
           if [ -z "$VERSION" ]; then
             echo "::error::Release tag '$RELEASE_TAG' has no version number in it. Use a tag like 0.3.0 or v0.3.0."
             exit 1
           fi
-          echo "Building version $VERSION for release $RELEASE_TAG"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          if [ "$VERSION" != "$PKG" ]; then
+            echo "::error::Release tag $RELEASE_TAG says $VERSION but the tagged commit's package.json says $PKG — the tag points at the wrong commit. Delete this release and its tag, then publish again choosing 'create new tag on publish' so it lands on current main."
+            exit 1
+          fi
+          echo "Building version $VERSION for release $RELEASE_TAG" 
 
       - name: Build installer, portable exe and zip
         run: npx electron-builder --win nsis portable zip --x64 --publish never
