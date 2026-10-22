@@ -18,7 +18,23 @@ env:
   RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
 
 jobs:
+  # Unit tests plus a boot smoke test: launches the real app under a virtual display and fails
+  # on any renderer error — a top-level throw in app.js (half-dead UI) can't ship again.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: xvfb-run -a npm run test:e2e
+      - run: xvfb-run -a npm run test:e2e:agent
+
   build:
+    needs: smoke
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

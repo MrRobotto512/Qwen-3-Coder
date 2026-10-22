@@ -1,13 +1,15 @@
 {
   "name": "qwen-workspace",
-  "version": "0.9.18",
+  "version": "0.9.19",
   "description": "Desktop coding workspace powered by Qwen (Ollama, LM Studio, or any OpenAI-compatible API)",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win nsis portable zip --x64",
     "dist:zip": "electron-builder --win zip",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node test/e2e-smoke.mjs",
+    "test:e2e:agent": "node test/e2e-agent.mjs"
   },
   "author": "",
   "dependencies": {
@@ -19,7 +21,8 @@
   },
   "devDependencies": {
     "electron": "^44.9.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "playwright-core": "^1.64.1"
   },
   "productName": "Qwen Workspace",
   "build": {

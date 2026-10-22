@@ -1329,6 +1329,17 @@ const CORE_TOOLS = [
   }
 ];
 
+const PROGRAM_TOOL = {
+  type: 'function',
+  function: {
+    name: 'run_program',
+    description: 'Run a short JavaScript program that batches many tool calls in one turn — sequence, branch, loop, Promise.all. The code is the body of an async function. Call tools as `await tools.read_file({ path: "src/a.js" })`; each returns the tool\'s result as a string, and a failed call rejects with the error text (try/catch to handle it). `console.log(...)` reports progress, `sleep(ms)` waits, and `return` a final summary. There is no network, file system, require or import — only the provided tools, which still follow the user\'s approval rules. Max 50 tool calls. Use it for mechanical multi-step work (collect TODOs from many files, apply the same change across files); work step by step yourself when each step needs judgment.',
+    parameters: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript statements forming an async function body.' } }, required: ['code'] }
+  }
+};
+// Meta tools stay outside programs: they steer the conversation, not the project.
+const PROGRAM_EXCLUDED = new Set(['run_program', 'consult_planner', 'tool_search', 'load_skill', 'ask_user', 'todo_write']);
+
 const DEFERRED_TOOLS = [
   {
     type: 'function',
@@ -1486,17 +1497,6 @@ async function showConvModelMenu(anchor) {
   items.push({ label: 'Model settings…', icon: 'settings', onClick: openSettings });
   showMenu(r.left, r.top, items, { above: true });
 }
-
-const PROGRAM_TOOL = {
-  type: 'function',
-  function: {
-    name: 'run_program',
-    description: 'Run a short JavaScript program that batches many tool calls in one turn — sequence, branch, loop, Promise.all. The code is the body of an async function. Call tools as `await tools.read_file({ path: "src/a.js" })`; each returns the tool\'s result as a string, and a failed call rejects with the error text (try/catch to handle it). `console.log(...)` reports progress, `sleep(ms)` waits, and `return` a final summary. There is no network, file system, require or import — only the provided tools, which still follow the user\'s approval rules. Max 50 tool calls. Use it for mechanical multi-step work (collect TODOs from many files, apply the same change across files); work step by step yourself when each step needs judgment.',
-    parameters: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript statements forming an async function body.' } }, required: ['code'] }
-  }
-};
-// Meta tools stay outside programs: they steer the conversation, not the project.
-const PROGRAM_EXCLUDED = new Set(['run_program', 'consult_planner', 'tool_search', 'load_skill', 'ask_user', 'todo_write']);
 
 const CONSULT_TOOL = {
   type: 'function',
