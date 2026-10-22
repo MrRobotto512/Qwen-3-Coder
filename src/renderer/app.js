@@ -2450,11 +2450,33 @@ async function runConversation(c) {
   let autoNudges = 0; // times this run we pushed back on an announce-then-stop reply
   let ranTools = false; // whether any tool has run in this task yet
   let failStreak = 0; // consecutive rounds containing a failed call
+  let interventions = 0; // how often the app has had to push back this task
+  let heavyTakeover = false; // after repeated pushbacks, the heavy model drives the rest
+
+  // Record an intervention. With a heavy model configured, it takes the next turn — and after
+  // the second intervention it takes over the whole task, since the light model keeps fumbling.
+  const escalate = (reason) => {
+    interventions++;
+    if (!heavyOverride()) return;
+    escalateNext = true;
+    let text = null;
+    if (!heavyTakeover && interventions >= 2) {
+      heavyTakeover = true;
+      text = `Qwen keeps getting stuck — ${heavyLabel()} is driving the rest of this task.`;
+    } else if (reason && !heavyTakeover) {
+      text = `${reason} — handing off to ${heavyLabel()}.`;
+    }
+    if (text) {
+      const item = { t: 'notice', text };
+      c.display.push(item);
+      renderNotice(c, item);
+    }
+  };
   for (let step = 0; step < maxSteps; step++) {
     if (c.stopRequested) return false;
     if (contextUse(c).tokens >= contextUse(c).window * COMPACT_AT) await compactConversation(c);
     if (c.stopRequested) return false;
-    const override = escalateNext ? heavyOverride() : null;
+    const override = heavyTakeover || escalateNext ? heavyOverride() : null;
     escalateNext = false;
     const view = addAssistantMessage(c, null, override ? override.model : null);
     const id = `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
@@ -2531,14 +2553,18 @@ async function runConversation(c) {
           nudge = 'Your reply contained a tool call that could not be parsed, so nothing ran. Re-send it as one valid call: either use the native tool-calling format, or exactly <tool_call>{"name": "<tool>", "arguments": { … }}</tool_call> with correct JSON. Do not mix prose into the call.';
         } else if (ToolParse.announcesAction(msg.content)) {
           nudge = 'Your reply announced an action but contained no tool call, so nothing ran. Do it now: emit the tool call(s) for the step you described (ask_user, web_search, run_command, install_app, …). Remember that text and code blocks are never executed. Do not describe the step again.';
-        } else if (!ranTools && ToolParse.looksLikeInstructions(msg.content)) {
-          nudge = 'You gave the user a list of steps instead of performing them. You are an agent with tools: unless the user asked only for an explanation, carry the steps out yourself now — research with web_search, install with install_app, create files with write_file, run commands with run_command, ask with ask_user. Start with step 1 now, as a tool call.';
+        } else {
+          const guide = ToolParse.looksLikeInstructions(msg.content);
+          // "Step N:" how-tos are never a final answer; a numbered list only counts before any
+          // tool has run, since a finished task may legitimately end with a numbered summary.
+          if (guide === 'steps' || (guide && !ranTools)) {
+            nudge = 'You gave the user a list of steps instead of performing them. You are an agent with tools: unless the user asked only for an explanation, carry the steps out yourself now — research with web_search, install with install_app, create files with write_file, run commands with run_command, ask with ask_user. Start with step 1 now, as a tool call.';
+          }
         }
         if (nudge) {
           autoNudges++;
           c.history.push({ role: 'user', content: `<system-reminder>\n${nudge}\n</system-reminder>` });
-          // If a heavy model is configured, let it take this recovery turn.
-          if (heavyOverride()) escalateNext = true;
+          escalate(null);
           continue;
         }
       }
@@ -2571,25 +2597,14 @@ async function runConversation(c) {
     failStreak = roundFailed ? failStreak + 1 : 0;
     if (failStreak === 2) {
       c.history.push({ role: 'user', content: '<system-reminder>\nSteps keep failing and you are continuing the plan anyway. Stop advancing. Deal with the most recent failure first: read its error output, research it with web_search if it is unclear, then fix it or change approach. Never continue as if a failed step had succeeded, and never rerun a failed command unchanged. If you are genuinely blocked, ask the user with ask_user.\n</system-reminder>' });
-      if (heavyOverride()) {
-        escalateNext = true;
-        const item = { t: 'notice', text: `Steps keep failing — handing off to ${heavyLabel()} to deal with the error.` };
-        c.display.push(item);
-        renderNotice(c, item);
-      }
+      escalate('Steps keep failing');
     }
 
     stall = progressed ? 0 : stall + 1;
     // Nudge the model back on track before it burns through the whole budget.
     if (stall === STALL_LIMIT) {
       c.history.push({ role: 'user', content: '<system-reminder>\nYou have repeated steps without making progress. Stop exploring. Either make the next concrete change for the current plan item, or, if you are blocked or the task is done, reply to the user in plain text (no tool call) — ask a question with ask_user if you need a decision.\n</system-reminder>' });
-      // If a heavy model is set up, hand the next turn to it to break the impasse.
-      if (heavyOverride()) {
-        escalateNext = true;
-        const item = { t: 'notice', text: `Qwen seems stuck — handing off to ${heavyLabel()} for the next step.` };
-        c.display.push(item);
-        renderNotice(c, item);
-      }
+      escalate('Qwen seems stuck');
     }
     if (step === maxSteps - 2) {
       c.history.push({ role: 'user', content: '<system-reminder>\nThis is your last step. Finish now: summarize what you did and what remains for the user, in plain text with no tool call.\n</system-reminder>' });

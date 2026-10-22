@@ -115,7 +115,11 @@ function looksLikeInstructions(text) {
   if (t.length < 200) return false;
   const numbered = (t.match(/^\s{0,3}\d+\.\s/gm) || []).length;
   const stepHeads = (t.match(/^#{0,4}\s*(\*\*)?step\s*\d/gim) || []).length;
-  return stepHeads >= 2 || numbered >= 4;
+  // 'steps' ("Step 3: …" headings) is unmistakably a how-to, even mid-task; a numbered 'list'
+  // could also be a legitimate final summary, so the caller treats it with more care.
+  if (stepHeads >= 2) return 'steps';
+  if (numbered >= 4) return 'list';
+  return false;
 }
 
 const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions };

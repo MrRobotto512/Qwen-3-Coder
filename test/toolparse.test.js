@@ -72,9 +72,9 @@ test('announcesAction: real final answers are left alone', () => {
 test('looksLikeInstructions: step-by-step how-tos are caught', () => {
   const { looksLikeInstructions } = require('../src/renderer/toolparse.js');
   const tutorial = ['Here is how to create the application:', '', '### Step 1: Install Tools', '1. Install Node.js.', '2. Install Rust.', '', '### Step 6: Test and Debug', '1. Build and run the application.', '2. Test the DVD extraction and game launch.', '3. Debug any issues that arise.', '', '### Step 7: Package and Distribute', '1. Package the application for distribution.', '2. Ensure it is user-friendly and easy to install.', '', 'This is a basic outline of the steps required to create the application.'].join('\n');
-  assert.equal(looksLikeInstructions(tutorial), true);
+  assert.equal(looksLikeInstructions(tutorial), 'steps');
   const numbered = 'To set this up you will need to do the following, roughly in order, and each item matters:\n1. Download the SDK from the site.\n2. Unzip it to C:\\sdk and add it to PATH for your user account.\n3. Run the installer with the default options selected.\n4. Reboot the machine before the first build attempt.\n5. Verify with sdk --version from a fresh terminal.';
-  assert.equal(looksLikeInstructions(numbered), true);
+  assert.equal(looksLikeInstructions(numbered), 'list');
 });
 
 test('looksLikeInstructions: normal answers are left alone', () => {
