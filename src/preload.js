@@ -92,7 +92,7 @@ contextBridge.exposeInMainWorld('api', {
   convSave: (conv) => ipcRenderer.invoke('conv:save', conv),
   convDelete: (id) => ipcRenderer.invoke('conv:delete', id),
 
-  listModels: () => ipcRenderer.invoke('model:list'),
+  listModels: (override) => ipcRenderer.invoke('model:list', override),
   chatStream: (id, payload) => ipcRenderer.invoke('chat:stream', id, payload),
   chatAbort: (id) => ipcRenderer.invoke('chat:abort', id),
   onChatEvent: (cb) => {

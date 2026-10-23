@@ -362,8 +362,10 @@ function apiUrl(s, suffix) {
   return s.baseUrl.trim().replace(/\/+$/, '') + suffix;
 }
 
-ipcMain.handle('model:list', async () => {
-  const s = loadSettings();
+ipcMain.handle('model:list', async (_e, override) => {
+  // `override` lets the UI list models for a connection other than the saved one (e.g. the
+  // planner's), and the agent loop list live siblings during model failover.
+  const s = { ...loadSettings(), ...(override || {}) };
   const res = await fetch(apiUrl(s, '/models'), { headers: apiHeaders(s), signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const json = await res.json();

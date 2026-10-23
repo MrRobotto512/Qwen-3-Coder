@@ -138,14 +138,31 @@ function isBusyModelError(text) {
   return /\b(503|429|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded|high demand|rate.?limit|try again later|server had an error)\b/i.test(String(text || ''));
 }
 
-// Sibling models worth trying when one is overloaded, strongest first.
-const GEMINI_FAMILY = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
-function modelAlternates(model) {
-  const m = String(model || '');
-  if (!/^gemini-/i.test(m)) return [];
-  return GEMINI_FAMILY.filter((x) => x !== m);
+// Does a model error mean the model itself is gone for this account (retired, renamed, never
+// existed)? Then retrying is pointless and a sibling should be tried at once.
+function isDeadModelError(text) {
+  return /\b404\b|NOT_FOUND|no longer available|not available to new users|has been (deprecated|retired|decommissioned)|unknown model|does not exist/i.test(String(text || ''));
 }
 
-const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions, stripFakeReminders, isBusyModelError, modelAlternates, GEMINI_FAMILY };
+// Sibling models worth trying when one is overloaded or retired. `available` is the provider's
+// live /models list when we could fetch it; the static family is only the offline fallback.
+// Ranking: pro before flash before flash-lite, newest version first.
+const GEMINI_FAMILY = ['gemini-3.1-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+function modelAlternates(model, available) {
+  const failed = String(model || '').replace(/^models\//, '');
+  if (!/^gemini/i.test(failed)) return [];
+  const live = [...new Set((available || []).map((m) => String(m).replace(/^models\//, '')))]
+    .filter((m) => /^gemini-\d/i.test(m))
+    .filter((m) => !/(embed|imagen|image|tts|audio|live|veo|nano|robotics|computer)/i.test(m));
+  const pool = live.length ? live : GEMINI_FAMILY;
+  const cls = (m) => (/pro/i.test(m) ? 0 : /flash/i.test(m) && !/lite/i.test(m) ? 1 : /flash/i.test(m) ? 2 : 3);
+  const ver = (m) => {
+    const x = /gemini-(\d+(?:\.\d+)?)/i.exec(m);
+    return x ? parseFloat(x[1]) : 0;
+  };
+  return pool.filter((m) => m !== failed).sort((a, b) => cls(a) - cls(b) || ver(b) - ver(a));
+}
+
+const ToolParseExports = { TOOL_TEXT_MARKER, jsonToolCallRe, textToolCallStart, readJsonObject, extractTextToolCalls, announcesAction, looksLikeInstructions, stripFakeReminders, isBusyModelError, isDeadModelError, modelAlternates, GEMINI_FAMILY };
 if (typeof module !== 'undefined' && module.exports) module.exports = ToolParseExports;
 if (typeof window !== 'undefined') window.ToolParse = ToolParseExports;

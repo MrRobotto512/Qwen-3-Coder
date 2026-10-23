@@ -2690,28 +2690,35 @@ async function runConversation(c) {
     }
 
     if (!res.ok) {
-      // "Busy" errors (503/429/overloaded) get a retry, then a sibling model, then — for a
-      // cloud helper — a fallback to the local model, instead of killing the task.
-      if (ToolParse.isBusyModelError(res.error)) {
+      // "Busy" (503/429) gets a retry, then a sibling; a retired/unknown model (404) switches
+      // to a sibling at once. Siblings come from the provider's live /models list, so the app
+      // keeps working when the provider renames or retires models. For a cloud helper the last
+      // resort is the local model, instead of killing the task.
+      const busy = ToolParse.isBusyModelError(res.error);
+      const dead = !busy && ToolParse.isDeadModelError(res.error);
+      if (busy || dead) {
         const failedModel = override?.model || state.settings.model;
         dropEmptyTurn();
         if (esc && !heavyTakeover) escalateNext = true; // keep a one-shot escalation alive
-        if (!retriedBusy.has(failedModel)) {
+        if (busy && !retriedBusy.has(failedModel)) {
           retriedBusy.add(failedModel);
           note(`${failedModel} is overloaded — retrying in 8 seconds.`);
           await new Promise((r) => setTimeout(r, 8000));
           continue;
         }
-        const next = ToolParse.modelAlternates(failedModel).find((m) => !retriedBusy.has(m));
+        retriedBusy.add(failedModel); // dead, or already retried: move to a sibling
+        const conn = override || { provider: state.settings.provider, baseUrl: state.settings.baseUrl, apiKey: state.settings.apiKey };
+        const live = await api.listModels({ provider: conn.provider, baseUrl: conn.baseUrl, apiKey: conn.apiKey }).catch(() => []);
+        const next = ToolParse.modelAlternates(failedModel, live).find((m) => !retriedBusy.has(m));
         if (next) {
           modelSwap.set(failedModel, next);
           for (const [orig, cur] of modelSwap) if (cur === failedModel) modelSwap.set(orig, next);
-          note(`${failedModel} is still overloaded — switching to ${next} for the rest of this task.`);
+          note(dead ? `${failedModel} is not available on this key anymore — switching to ${next} for the rest of this task.` : `${failedModel} is still overloaded — switching to ${next} for the rest of this task.`);
           continue;
         }
         if (override) {
           cloudDead = true;
-          note(`Every ${/^gemini/i.test(failedModel) ? 'Gemini' : 'cloud'} model is busy right now — continuing on ${state.settings.model}.`);
+          note(`No usable ${/^gemini/i.test(failedModel) ? 'Gemini' : 'cloud'} model right now — continuing on ${state.settings.model}.`);
           continue;
         }
       }
@@ -4748,6 +4755,23 @@ function bindUi() {
     if (p && p.model) $('#s-heavy-model').value = p.model;
   };
   $('#s-heavy-enabled').onchange = (e) => $('#s-heavy-fields').classList.toggle('hidden', !e.target.checked);
+  $('#s-heavy-fetch').onclick = async () => {
+    const out = $('#s-heavy-result');
+    out.className = 'hint';
+    out.textContent = 'Connecting…';
+    try {
+      const models = await api.listModels({ provider: $('#s-heavy-provider').value, baseUrl: $('#s-heavy-baseUrl').value.trim(), apiKey: $('#s-heavy-apiKey').value.trim() });
+      const clean = [...new Set(models.map((m) => String(m).replace(/^models\//, '')))];
+      $('#heavy-model-list').replaceChildren(...clean.map((m) => el('option', { value: m })));
+      const ranked = ToolParse.modelAlternates('gemini-none', clean);
+      out.className = 'hint ok';
+      out.textContent = `Connected ✓ ${clean.length} models${ranked.length ? `. Strongest for planning: ${ranked.slice(0, 3).join(', ')}` : ''}`;
+      if (ranked.length && !clean.includes($('#s-heavy-model').value.trim())) $('#s-heavy-model').value = ranked[0];
+    } catch (e) {
+      out.className = 'hint bad';
+      out.textContent = `Could not connect: ${cleanError(e)}`;
+    }
+  };
   $('#s-fetch-models').onclick = fetchModels;
   $('#s-searchProvider').onchange = renderSearchFields;
   $('#mcp-add-btn').onclick = addServerFromForm;

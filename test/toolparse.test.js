@@ -117,9 +117,23 @@ test('isBusyModelError: overload/ratelimit errors are retryable, real failures a
   assert.equal(isBusyModelError('fetch failed: ECONNREFUSED 127.0.0.1:11434'), false);
 });
 
-test('modelAlternates: walks the Gemini family, strongest first', () => {
+test('modelAlternates: prefers the live model list, pro first, newest first', () => {
   const { modelAlternates } = require('../src/renderer/toolparse.js');
-  assert.deepEqual(modelAlternates('gemini-2.5-flash'), ['gemini-2.5-pro', 'gemini-2.5-flash-lite']);
-  assert.deepEqual(modelAlternates('gemini-2.5-pro'), ['gemini-2.5-flash', 'gemini-2.5-flash-lite']);
-  assert.deepEqual(modelAlternates('qwen2.5-coder:7b'), []);
+  // Live list from the provider (with the models/ prefix Gemini uses) beats the static family:
+  // a retired 2.5-pro is absent, and the newest pro ranks first.
+  const live = ['models/gemini-3.1-pro-preview', 'models/gemini-2.5-flash', 'models/gemini-2.5-flash-lite', 'models/gemini-embedding-001', 'models/imagen-4'];
+  assert.deepEqual(modelAlternates('gemini-2.5-flash', live), ['gemini-3.1-pro-preview', 'gemini-2.5-flash-lite']);
+  assert.deepEqual(modelAlternates('gemini-2.5-pro', live), ['gemini-3.1-pro-preview', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']);
+  // Without a live list, the static family still provides a fallback chain.
+  assert.deepEqual(modelAlternates('gemini-2.5-flash'), ['gemini-3.1-pro-preview', 'gemini-2.5-pro', 'gemini-2.5-flash-lite']);
+  assert.deepEqual(modelAlternates('qwen2.5-coder:7b', live), []);
+});
+
+test('isDeadModelError: retired/unknown models are told apart from busy ones', () => {
+  const { isDeadModelError, isBusyModelError } = require('../src/renderer/toolparse.js');
+  const retired = 'HTTP 404: "message": "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview", "status": "NOT_FOUND"';
+  assert.equal(isDeadModelError(retired), true);
+  assert.equal(isBusyModelError(retired), false);
+  assert.equal(isDeadModelError('HTTP 503: UNAVAILABLE, high demand'), false);
+  assert.equal(isDeadModelError('HTTP 401: invalid API key'), false);
 });
